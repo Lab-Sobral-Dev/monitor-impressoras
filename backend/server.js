@@ -12,6 +12,12 @@ const path         = require('path');
 
 const app = express();
 
+// Atrás de 1 proxy reverso (Apache no .214, HTTP e HTTPS) — sem isso o
+// express-rate-limit rejeita o X-Forwarded-For que o Apache já envia
+// (ERR_ERL_UNEXPECTED_X_FORWARDED_FOR), quebrando as rotas com rate limit
+// (ex.: /api/auth/sso, /api/auth/login).
+app.set('trust proxy', 1);
+
 // ── Validação de IP e campos de impressora ────────────────────────────────────
 const IPV4_RE = /^((25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(25[0-5]|2[0-4]\d|[01]?\d\d?)$/;
 
