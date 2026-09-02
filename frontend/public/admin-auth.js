@@ -1,3 +1,22 @@
+// ── Regra: produto externo entra por dentro, não por link ────────────────────
+// (PROTOCOLO-DE-ACOPLAMENTO.md, sbrgestao). Checagem client-side: não depende
+// de headers como Sec-Fetch-Dest, que alguns navegadores/configurações de
+// privacidade não enviam (achado ao vivo — Firefox real sem o header).
+// window.self !== window.top só é true quando a página está de fato dentro
+// de um iframe — funciona em qualquer navegador, sem exceção.
+(function protegerContraAcessoDireto() {
+  if (window.self === window.top) {
+    window.location.replace('https://gestao.laboratoriosobral.com.br/ti/monitor-impressoras');
+    return;
+  }
+  // Embutido no Gestão: esconde usuário/tema/sair do rodapé do sidebar — o
+  // Gestão já mostra quem está logado, "Sair" aqui não faz sentido no iframe.
+  document.addEventListener('DOMContentLoaded', () => {
+    const rodape = document.querySelector('.sb-footer');
+    if (rodape) rodape.style.display = 'none';
+  });
+})();
+
 function getToken() {
   try { return JSON.parse(sessionStorage.getItem('ic_token') || 'null'); } catch { return null; }
 }

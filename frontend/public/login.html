@@ -521,6 +521,14 @@
   </div><!-- /scene -->
 
 <script>
+  /* ── Regra: produto externo entra por dentro, não por link ──────────────────
+     Checagem client-side (não depende de Sec-Fetch-Dest — alguns navegadores/
+     configurações de privacidade não enviam esse header; achado ao vivo).
+     window.self !== window.top só é true dentro de um iframe de verdade. */
+  if (window.self === window.top) {
+    window.location.replace('https://gestao.laboratoriosobral.com.br/ti/monitor-impressoras');
+  }
+
   /* ── Session ── */
   function getToken() {
     try { return JSON.parse(sessionStorage.getItem('ic_token') || 'null'); } catch { return null; }
