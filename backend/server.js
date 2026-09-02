@@ -434,18 +434,59 @@ const publicDir = publicDirs.find(dir => fs.existsSync(dir)) || publicDirs[0];
 
 // ── Regra: produto externo entra por dentro, não por link ────────────────────
 // (PROTOCOLO-DE-ACOPLAMENTO.md, sbrgestao). Navegação de topo (fora do iframe
-// do Gestão) pra qualquer página estática é redirecionada pro Gestão; dentro
-// do iframe o browser manda `Sec-Fetch-Dest: iframe`, não `document`, e passa
-// direto. Chamadas de API (fetch/XHR) usam `Sec-Fetch-Dest: empty` — não afeta.
-// Requisições sem esse header (curl, healthcheck do Docker) também passam —
-// o gate é só pra navegação de browser real.
+// do Gestão) pra qualquer página estática mostra um aviso em vez do login;
+// dentro do iframe o browser manda `Sec-Fetch-Dest: iframe`, não `document`, e
+// passa direto. Chamadas de API (fetch/XHR) usam `Sec-Fetch-Dest: empty` — não
+// afeta. Requisições sem esse header (curl, healthcheck do Docker) também
+// passam — o gate é só pra navegação de browser real.
 const GESTAO_URL_TINTA_BRANCA = process.env.GESTAO_URL_TINTA_BRANCA
     || 'https://gestao.laboratoriosobral.com.br/ti/monitor-impressoras';
+
+function paginaAbraNoGestao(urlGestao) {
+    return `<!doctype html>
+<html lang="pt-BR"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tinta Branca | Acesso</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{
+    font-family:system-ui,-apple-system,'Segoe UI',sans-serif;
+    background-color:#1a0800;color:#f0f0f0;
+    display:flex;align-items:center;justify-content:center;
+    text-align:center;position:relative;overflow:hidden;
+  }
+  body::before{
+    content:'';position:fixed;inset:0;pointer-events:none;
+    background:
+      radial-gradient(ellipse 90% 80% at 20% 50%, rgba(180,60,0,0.55) 0%, transparent 55%),
+      radial-gradient(ellipse 60% 70% at 65% 30%, rgba(251,102,2,0.22) 0%, transparent 50%),
+      radial-gradient(ellipse 70% 60% at 80% 80%, rgba(120,30,0,0.35) 0%, transparent 55%),
+      radial-gradient(ellipse 100% 100% at 50% 50%, rgba(10,4,0,0.85) 0%, transparent 100%);
+  }
+  .card{position:relative;z-index:1;max-width:420px;padding:0 24px}
+  h1{font-size:28px;font-weight:800;color:#FB6602;letter-spacing:0.5px;margin-bottom:12px}
+  p{color:rgba(255,255,255,0.65);font-size:15px;line-height:1.5;margin-bottom:28px}
+  a.btn{
+    display:inline-block;padding:14px 32px;border-radius:8px;
+    background:linear-gradient(135deg,#FB6602 0%,#d94e00 100%);
+    color:#fff;font-weight:700;text-decoration:none;letter-spacing:0.5px;
+  }
+</style></head>
+<body>
+  <div class="card">
+    <h1>Abra direto no Gestão SBR</h1>
+    <p>O Tinta Branca agora faz parte do Gestão SBR — acesse por lá, sem precisar logar de novo aqui.</p>
+    <a class="btn" href="${urlGestao}">Abrir no Gestão SBR</a>
+  </div>
+</body></html>`;
+}
 
 app.use((req, res, next) => {
     if (req.method !== 'GET' || req.path.startsWith('/api/')) return next();
     if (req.headers['sec-fetch-dest'] === 'document') {
-        return res.redirect(302, GESTAO_URL_TINTA_BRANCA);
+        res.set('Content-Type', 'text/html; charset=utf-8');
+        return res.status(200).send(paginaAbraNoGestao(GESTAO_URL_TINTA_BRANCA));
     }
     next();
 });
