@@ -208,6 +208,65 @@ function verificarSenha(senha, armazenado) {
     });
 }
 
+// ── Acoplamento ao Gestão (gestao-sbr) — Protocolo de Acoplamento ────────────
+// JWT HS256 curto (60s) emitido pelo Gestão após o usuário já ter passado
+// pelo gate `ti.monitoramento.read` lá — este produto confia no token e não
+// fala com o AD. Verificação por HMAC nativo (crypto), sem lib de JWT.
+// Ver docs/PROTOCOLO-DE-ACOPLAMENTO.md no repo sbrgestao.
+const DOCKING_SECRET_ACOPLAMENTO = process.env.DOCKING_SECRET_MONITOR_IMPRESSORAS;
+const DOCKING_PRODUTO_SLUG = 'monitor-impressoras';
+
+function base64urlDecodeToString(str) {
+    let s = String(str).replace(/-/g, '+').replace(/_/g, '/');
+    while (s.length % 4) s += '=';
+    return Buffer.from(s, 'base64').toString('utf8');
+}
+
+function verificarTokenAcoplamento(token, secret) {
+    const partes = String(token || '').split('.');
+    if (partes.length !== 3) return null;
+    const [headerB64, payloadB64, sigB64] = partes;
+    const assinaturaEsperada = crypto
+        .createHmac('sha256', secret)
+        .update(`${headerB64}.${payloadB64}`)
+        .digest('base64url');
+    const a = Buffer.from(assinaturaEsperada);
+    const b = Buffer.from(sigB64);
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
+
+    let payload;
+    try { payload = JSON.parse(base64urlDecodeToString(payloadB64)); } catch { return null; }
+    if (!payload || typeof payload !== 'object') return null;
+    if (!payload.sub || payload.produto !== DOCKING_PRODUTO_SLUG) return null;
+    if (typeof payload.exp !== 'number' || Date.now() / 1000 > payload.exp) return null;
+    return payload;
+}
+
+function provisionarUsuarioAcoplado(sub, nomeExibicao) {
+    return new Promise((resolve, reject) => {
+        db.get('SELECT * FROM usuarios WHERE usuario = ?', [sub], async (err, user) => {
+            if (err) return reject(err);
+            if (user) return resolve(user);
+            try {
+                // Senha aleatória e nunca comunicada — esta conta só entra via SSO.
+                // Só chega aqui quem já passou pelo gate `ti.monitoramento.read` no Gestão.
+                const hash = await hashSenha(crypto.randomBytes(32).toString('hex'));
+                db.run(
+                    `INSERT INTO usuarios (nome, usuario, senha_hash, perfil, permissoes) VALUES (?, ?, ?, 'admin', ?)`,
+                    [nomeExibicao || sub, sub, hash, JSON.stringify(PERMISSOES_PADRAO)],
+                    function (e) {
+                        if (e) return reject(e);
+                        db.get('SELECT * FROM usuarios WHERE id = ?', [this.lastID], (e2, novoUser) => {
+                            if (e2) return reject(e2);
+                            resolve(novoUser);
+                        });
+                    }
+                );
+            } catch (e) { reject(e); }
+        });
+    });
+}
+
 // ── Credencial de estoque ─────────────────────────────────────────────────────
 let ESTOQUE_SENHA = process.env.ESTOQUE_SENHA;
 if (!ESTOQUE_SENHA) {
@@ -329,6 +388,10 @@ app.use(helmet({
             ...cspDirectives,
             'script-src':      ["'self'", "'unsafe-inline'", "https://cdn.jsdelivr.net"],
             'script-src-attr': ["'unsafe-inline'"],
+            // Libera o embed em iframe pelo Gestão (gestao-sbr) — Protocolo de
+            // Acoplamento. Sem isso o Helmet cai no default `frame-ancestors: 'self'`
+            // e o navegador bloqueia o embed.
+            'frame-ancestors': ["'self'", "http://gestao.labsobralnet.ind", "https://gestao.laboratoriosobral.com.br"],
         }
     }
 }));
@@ -368,6 +431,25 @@ const publicDirs = [
     path.join(__dirname, 'public'),
 ];
 const publicDir = publicDirs.find(dir => fs.existsSync(dir)) || publicDirs[0];
+
+// ── Regra: produto externo entra por dentro, não por link ────────────────────
+// (PROTOCOLO-DE-ACOPLAMENTO.md, sbrgestao). Navegação de topo (fora do iframe
+// do Gestão) pra qualquer página estática é redirecionada pro Gestão; dentro
+// do iframe o browser manda `Sec-Fetch-Dest: iframe`, não `document`, e passa
+// direto. Chamadas de API (fetch/XHR) usam `Sec-Fetch-Dest: empty` — não afeta.
+// Requisições sem esse header (curl, healthcheck do Docker) também passam —
+// o gate é só pra navegação de browser real.
+const GESTAO_URL_TINTA_BRANCA = process.env.GESTAO_URL_TINTA_BRANCA
+    || 'https://gestao.laboratoriosobral.com.br/ti/monitor-impressoras';
+
+app.use((req, res, next) => {
+    if (req.method !== 'GET' || req.path.startsWith('/api/')) return next();
+    if (req.headers['sec-fetch-dest'] === 'document') {
+        return res.redirect(302, GESTAO_URL_TINTA_BRANCA);
+    }
+    next();
+});
+
 app.use(express.static(publicDir));
 
 // ── SNMP ──────────────────────────────────────────────────────────────────────
@@ -656,6 +738,42 @@ app.delete('/api/estoque/:id', exigirPermissao('estoque'), (req, res, next) => {
         if (this.changes === 0) return res.status(404).json({ erro: 'Item não encontrado' });
         res.status(204).end();
     });
+});
+
+// ── SSO do Protocolo de Acoplamento (público — é a porta de entrada do Gestão) ─
+app.get('/api/auth/sso', limiterAuth, async (req, res) => {
+    if (!DOCKING_SECRET_ACOPLAMENTO) return res.status(503).send('Acoplamento não configurado.');
+
+    const { token } = req.query;
+    if (!token) return res.status(400).send('Token ausente.');
+
+    const payload = verificarTokenAcoplamento(token, DOCKING_SECRET_ACOPLAMENTO);
+    if (!payload) return res.status(401).send('Token inválido, expirado ou produto incorreto.');
+
+    try {
+        const user = await provisionarUsuarioAcoplado(payload.sub, payload.email);
+        if (!user.ativo) return res.status(401).send('Usuário desativado.');
+
+        db.run('UPDATE usuarios SET ultimo_login = datetime(\'now\') WHERE id = ?', [user.id]);
+        const permissoes = user.perfil === 'admin' ? PERMISSOES_PADRAO : normalizarPermissoes(user.permissoes);
+        const sessao = JSON.stringify({
+            token: gerarTokenAdmin(user),
+            usuario: user.usuario,
+            perfil: user.perfil || 'admin',
+            permissoes
+        });
+
+        res.set('Content-Type', 'text/html; charset=utf-8');
+        res.send(`<!doctype html><html><head><meta charset="utf-8"><title>Tinta Branca</title></head><body>
+<script>
+  sessionStorage.setItem('ic_token', ${JSON.stringify(sessao)});
+  location.replace('admin.html');
+</script>
+</body></html>`);
+    } catch (e) {
+        console.error('Erro no acoplamento SSO:', e);
+        res.status(500).send('Erro interno no acoplamento.');
+    }
 });
 
 // ── Autenticação de admin ─────────────────────────────────────────────────────
