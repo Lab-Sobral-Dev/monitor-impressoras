@@ -892,7 +892,7 @@
     const html = '<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>' + escHTML(titulo) + '</title>' +
       '<style>' + cssImpressao() + '</style>' +
       '</head><body><div class="sheet"><button class="print-btn-top" onclick="window.print()">Imprimir</button>' +
-      '<header class="report-head"><div class="kicker">Monitor de impressoras</div><h1>' + escHTML(titulo) + '</h1><div class="meta">Gerado em ' + data + '</div></header>' +
+      '<header class="report-head"><div class="kicker">Tinta Branca</div><h1>' + escHTML(titulo) + '</h1><div class="meta">Gerado em ' + data + '</div></header>' +
       secoes.map(s => '<section class="section"><h2>' + escHTML(s.titulo) + '</h2>' + s.html + '</section>').join('') +
       '</div><script>window.addEventListener("load",()=>setTimeout(()=>window.print(),350));<\/script></body></html>';
     win.document.open();

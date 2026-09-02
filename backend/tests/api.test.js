@@ -413,3 +413,96 @@ describe('GET /api/estoque', () => {
         expect(Array.isArray(res.body)).toBe(true);
     });
 });
+
+// ── GET /api/auth/sso — Protocolo de Acoplamento (Gestão) ─────────────────────
+describe('GET /api/auth/sso', () => {
+    const SEGREDO = process.env.DOCKING_SECRET_MONITOR_IMPRESSORAS;
+
+    function base64url(input) {
+        return Buffer.from(input).toString('base64url');
+    }
+
+    function criarTokenAcoplamento(overrides = {}, segredo = SEGREDO) {
+        const header = { alg: 'HS256', typ: 'JWT' };
+        const payload = {
+            sub: 'pmiranda',
+            produto: 'monitor-impressoras',
+            email: 'pmiranda@laboratoriosobral.com.br',
+            exp: Math.floor(Date.now() / 1000) + 60,
+            ...overrides
+        };
+        const headerB64  = base64url(JSON.stringify(header));
+        const payloadB64 = base64url(JSON.stringify(payload));
+        const assinatura = require('crypto')
+            .createHmac('sha256', segredo)
+            .update(`${headerB64}.${payloadB64}`)
+            .digest('base64url');
+        return `${headerB64}.${payloadB64}.${assinatura}`;
+    }
+
+    function contarUsuario(usuario) {
+        return new Promise((resolve, reject) => {
+            db.get('SELECT COUNT(*) AS total FROM usuarios WHERE usuario = ?', [usuario], (err, row) => {
+                if (err) return reject(err);
+                resolve(row.total);
+            });
+        });
+    }
+
+    beforeEach(() => new Promise((resolve, reject) => {
+        db.run('DELETE FROM usuarios WHERE usuario = ?', ['pmiranda'], err => err ? reject(err) : resolve());
+    }));
+
+    it('deve retornar 400 sem token', async () => {
+        const res = await request(app).get('/api/auth/sso');
+        expect(res.status).toBe(400);
+    });
+
+    it('deve retornar 401 com assinatura inválida', async () => {
+        const token = criarTokenAcoplamento({}, 'segredo-errado');
+        const res = await request(app).get('/api/auth/sso').query({ token });
+        expect(res.status).toBe(401);
+    });
+
+    it('deve retornar 401 com token expirado', async () => {
+        const token = criarTokenAcoplamento({ exp: Math.floor(Date.now() / 1000) - 10 });
+        const res = await request(app).get('/api/auth/sso').query({ token });
+        expect(res.status).toBe(401);
+    });
+
+    it('deve retornar 401 quando o produto do claim não confere', async () => {
+        const token = criarTokenAcoplamento({ produto: 'outro-produto' });
+        const res = await request(app).get('/api/auth/sso').query({ token });
+        expect(res.status).toBe(401);
+    });
+
+    it('deve auto-provisionar o usuário e devolver sessão válida no primeiro acesso', async () => {
+        expect(await contarUsuario('pmiranda')).toBe(0);
+        const token = criarTokenAcoplamento();
+        const res = await request(app).get('/api/auth/sso').query({ token });
+        expect(res.status).toBe(200);
+        expect(res.text).toContain("sessionStorage.setItem('ic_token'");
+        expect(res.text).toContain('pmiranda');
+        expect(await contarUsuario('pmiranda')).toBe(1);
+    });
+
+    it('não deve duplicar usuário em acessos seguintes', async () => {
+        await request(app).get('/api/auth/sso').query({ token: criarTokenAcoplamento() });
+        await request(app).get('/api/auth/sso').query({ token: criarTokenAcoplamento() });
+        expect(await contarUsuario('pmiranda')).toBe(1);
+    });
+
+    it('deve retornar 503 quando o acoplamento não está configurado', async () => {
+        let resposta;
+        await jest.isolateModulesAsync(async () => {
+            const original = process.env.DOCKING_SECRET_MONITOR_IMPRESSORAS;
+            delete process.env.DOCKING_SECRET_MONITOR_IMPRESSORAS;
+            const isolado = require('../server');
+            await isolado.dbReady;
+            resposta = await request(isolado.app).get('/api/auth/sso').query({ token: 'qualquer' });
+            await new Promise(resolve => isolado.db.close(resolve));
+            process.env.DOCKING_SECRET_MONITOR_IMPRESSORAS = original;
+        });
+        expect(resposta.status).toBe(503);
+    });
+});
