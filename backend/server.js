@@ -782,7 +782,7 @@ app.get('/api/auth/sso', limiterAuth, async (req, res) => {
         res.send(`<!doctype html><html><head><meta charset="utf-8"><title>Tinta Branca</title></head><body>
 <script>
   sessionStorage.setItem('ic_token', ${JSON.stringify(sessao)});
-  location.replace('admin.html');
+  location.replace('/admin.html');
 </script>
 </body></html>`);
     } catch (e) {
