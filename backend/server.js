@@ -388,6 +388,14 @@ delete cspDirectives['upgrade-insecure-requests'];
 
 app.use(helmet({
     hsts: false,
+    // X-Frame-Options é um header legado que só suporta DENY/SAMEORIGIN — não
+    // entende múltiplas origens. Com o Gestão embutindo este produto de uma
+    // origem DIFERENTE (gestao.laboratoriosobral.com.br), SAMEORIGIN bloqueia
+    // o embed mesmo com o CSP frame-ancestors abaixo liberando explicitamente.
+    // Desliga o header legado e confia só no CSP moderno (todo browser atual
+    // já prioriza frame-ancestors sobre X-Frame-Options quando os dois existem,
+    // mas alguns ainda aplicam o mais restritivo — mais seguro remover o legado).
+    frameguard: false,
     contentSecurityPolicy: {
         useDefaults: false,
         directives: {
