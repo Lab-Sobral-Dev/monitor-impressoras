@@ -285,6 +285,11 @@ if (!ESTOQUE_SENHA) {
 const DB_PATH = process.env.DATABASE_PATH || './banco.db';
 const db = new sqlite3.Database(DB_PATH);
 
+// Auditoria de impressão por usuário (page_log do CUPS via PRINTSRV/.216).
+// Ausente = coleta desativada, nunca falha silenciosamente com erro de rede.
+const PAGELOG_API_URL   = process.env.PAGELOG_API_URL;
+const PAGELOG_API_TOKEN = process.env.PAGELOG_API_TOKEN;
+
 const dbReady = new Promise(resolve => {
     db.serialize(() => {
         db.run(`CREATE TABLE IF NOT EXISTS impressoras (
@@ -361,6 +366,22 @@ const dbReady = new Promise(resolve => {
             registrado_em TEXT DEFAULT (datetime('now')),
             FOREIGN KEY (impressora_id) REFERENCES impressoras(id) ON DELETE CASCADE
         )`);
+        db.run(`CREATE TABLE IF NOT EXISTS impressoes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            impressora TEXT,
+            usuario TEXT,
+            job_id INTEGER,
+            paginas INTEGER,
+            copias INTEGER,
+            hostname_origem TEXT,
+            documento TEXT,
+            registrado_em TEXT DEFAULT (datetime('now'))
+        )`);
+        db.run(`CREATE TABLE IF NOT EXISTS impressoes_cursor (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            last_line INTEGER NOT NULL DEFAULT 0
+        )`);
+        db.run(`INSERT OR IGNORE INTO impressoes_cursor (id, last_line) VALUES (1, 0)`);
         db.run('SELECT 1', resolve);
     });
 });
@@ -588,6 +609,66 @@ async function coletarHistorico() {
                 db.run('INSERT INTO historico_paginas (impressora_id, paginas_total, coletado_em) VALUES (?, ?, ?)',
                     [imp.id, paginas, agora]);
             }
+        }
+    });
+}
+
+// ── Auditoria de impressão por usuário (page_log do CUPS, PRINTSRV/.216) ───────
+// Formato da linha (PageLogFormat customizado no PRINTSRV):
+// printer|user|job-id|date-time|page-num|copies|job-originating-host-name|job-name
+function parsePageLogLine(linha) {
+    const campos = String(linha).split('|');
+    if (campos.length < 8) return null;
+    const [impressora, usuario, jobId, , pagina, copias, hostname, documento] = campos;
+    if (!impressora || !usuario) return null;
+    return {
+        impressora,
+        usuario,
+        jobId: Number(jobId) || null,
+        pagina: Number(pagina) || null,
+        copias: Number(copias) || null,
+        hostname,
+        documento
+    };
+}
+
+function buscarPageLog(sinceLine) {
+    return new Promise((resolve) => {
+        const url = `${PAGELOG_API_URL}/api/pagelog?since_line=${sinceLine}`;
+        const req = http.get(url, { headers: { 'X-API-Key': PAGELOG_API_TOKEN }, timeout: 5000 }, (res) => {
+            let data = '';
+            res.on('data', (chunk) => { data += chunk; });
+            res.on('end', () => {
+                if (res.statusCode !== 200) return resolve(null);
+                try { resolve(JSON.parse(data)); } catch { resolve(null); }
+            });
+        });
+        req.on('error', () => resolve(null));
+        req.on('timeout', () => req.destroy());
+    });
+}
+
+async function coletarImpressoes() {
+    if (!PAGELOG_API_URL || !PAGELOG_API_TOKEN) return;
+
+    db.get('SELECT last_line FROM impressoes_cursor WHERE id = 1', [], async (err, row) => {
+        if (err) return;
+        const cursor = row ? row.last_line : 0;
+        const resultado = await buscarPageLog(cursor);
+        if (!resultado || !Array.isArray(resultado.lines)) return;
+
+        for (const linha of resultado.lines) {
+            const p = parsePageLogLine(linha);
+            if (!p) continue;
+            db.run(
+                `INSERT INTO impressoes (impressora, usuario, job_id, paginas, copias, hostname_origem, documento)
+                 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+                [p.impressora, p.usuario, p.jobId, p.pagina, p.copias, p.hostname, p.documento]
+            );
+        }
+
+        if (typeof resultado.total_lines === 'number' && resultado.total_lines !== cursor) {
+            db.run('UPDATE impressoes_cursor SET last_line = ? WHERE id = 1', [resultado.total_lines]);
         }
     });
 }
@@ -1352,7 +1433,7 @@ app.use((err, req, res, next) => {
     res.status(500).json({ erro: 'Erro interno do servidor' });
 });
 
-module.exports = { app, db, dbReady, estoqueTokens };
+module.exports = { app, db, dbReady, estoqueTokens, parsePageLogLine };
 
 // ── Inicialização e graceful shutdown (apenas quando executado diretamente) ────
 if (require.main === module) {
@@ -1362,6 +1443,11 @@ if (require.main === module) {
     dbReady.then(() => {
         coletarHistorico();
         setInterval(coletarHistorico, 60 * 60 * 1000).unref();
+
+        if (PAGELOG_API_URL && PAGELOG_API_TOKEN) {
+            coletarImpressoes();
+            setInterval(coletarImpressoes, 5 * 60 * 1000).unref();
+        }
     });
 
     function encerrar(sinal) {
