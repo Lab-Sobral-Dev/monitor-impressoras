@@ -617,7 +617,9 @@ async function coletarHistorico() {
 // Formato da linha (PageLogFormat customizado no PRINTSRV):
 // printer|user|job-id|date-time|page-num|copies|job-originating-host-name|job-name
 function parsePageLogLine(linha) {
-    const campos = String(linha).split('|');
+    // CUPS envolve a linha inteira em aspas quando o PageLogFormat é customizado.
+    const semAspas = String(linha).replace(/^"|"$/g, '');
+    const campos = semAspas.split('|');
     if (campos.length < 8) return null;
     const [impressora, usuario, jobId, , pagina, copias, hostname, documento] = campos;
     if (!impressora || !usuario) return null;

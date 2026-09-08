@@ -29,6 +29,14 @@ describe('parsePageLogLine', () => {
         expect(parsePageLogLine(linha)).toBeNull();
     });
 
+    it('remove aspas envolvendo a linha inteira (CUPS com PageLogFormat customizado)', () => {
+        const linha = '"PIXMA130|pmiranda|1|[08/Sep/2026:18:36:04 +0000]|total|1|192.86.221.181|doc.txt"';
+        const r = parsePageLogLine(linha);
+        expect(r.impressora).toBe('PIXMA130');
+        expect(r.documento).toBe('doc.txt');
+        expect(r.pagina).toBeNull(); // "total" não é número de página
+    });
+
     it('usa null pra campos numéricos não parseáveis', () => {
         const linha = 'PIXMA130|jsilva|abc|[08/Sep/2026:14:55:09 +0000]|x|y|LABTI07|relatorio.pdf';
         const r = parsePageLogLine(linha);
