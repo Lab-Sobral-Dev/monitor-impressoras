@@ -149,6 +149,7 @@
       <button class="rel-tab"     onclick="mudarAba('impressoes',this)">&#x1F5A8;&#xFE0F; Impress&otilde;es</button>
       <button class="rel-tab"     onclick="mudarAba('tinta',this)">&#x1F58B;&#xFE0F; Consumo de Tinta</button>
       <button class="rel-tab"     onclick="mudarAba('trocas',this)">&#x1F501; Trocas de Toner</button>
+      <button class="rel-tab"     onclick="mudarAba('auditoria',this)">&#x1F9FE; Auditoria de Impress&atilde;o</button>
       <button class="rel-tab"     onclick="mudarAba('disponibilidade',this)">&#x1F4E1; Disponibilidade</button>
       <button class="rel-tab"     onclick="mudarAba('estoque',this)">&#x1F4E6; Estoque &times; Consumo</button>
       <button class="rel-tab"     onclick="mudarAba('imprimir',this)">&#x1F5A8;&#xFE0F; Imprimir</button>
@@ -211,6 +212,24 @@
         <button class="per-btn" onclick="carregarTrocasToner()">Atualizar</button>
       </div>
       <div id="trocas-content"><div class="empty-state">Carregando trocas de toner...</div></div>
+    </div>
+
+    <!-- Auditoria de Impressao -->
+    <div class="rel-panel" id="panel-auditoria">
+      <div class="sel-wrap">
+        <div class="rel-per">
+          <button class="per-btn act" onclick="setPeriodoAuditoria(7,this)">7 dias</button>
+          <button class="per-btn"     onclick="setPeriodoAuditoria(30,this)">30 dias</button>
+          <button class="per-btn"     onclick="setPeriodoAuditoria(90,this)">90 dias</button>
+          <button class="per-btn"     onclick="setPeriodoAuditoria(180,this)">180 dias</button>
+        </div>
+        <input class="rel-sel" id="audUsuario" placeholder="Filtrar por usu&aacute;rio" style="min-width:160px">
+        <select class="rel-sel" id="audImpressora" style="min-width:160px">
+          <option value="">&#x2014; Todas as impressoras &#x2014;</option>
+        </select>
+        <button class="per-btn" onclick="carregarAuditoria()">Filtrar</button>
+      </div>
+      <div id="auditoria-content"><div class="empty-state">Carregando auditoria de impress&atilde;o...</div></div>
     </div>
 
     <!-- Disponibilidade -->
@@ -393,6 +412,7 @@
     if (aba === 'impressoes'    && document.getElementById('sel-imp').value)   carregarImpressoes();
     if (aba === 'tinta'         && document.getElementById('sel-tinta').value) carregarTinta();
     if (aba === 'trocas')          carregarTrocasToner();
+    if (aba === 'auditoria')       carregarAuditoria();
     if (aba === 'disponibilidade') carregarDisponibilidade();
     if (aba === 'estoque')         carregarEstoque();
   }
@@ -562,6 +582,64 @@
     } catch(e) {
       console.error(e);
       div.innerHTML = '<div class="empty-state">Erro ao verificar trocas de toner.</div>';
+    }
+  }
+
+  let periodoAuditoria = 7;
+
+  function setPeriodoAuditoria(dias, btn) {
+    periodoAuditoria = dias;
+    document.querySelectorAll('#panel-auditoria .per-btn').forEach(b => b.classList.remove('act'));
+    btn.classList.add('act');
+    carregarAuditoria();
+  }
+
+  function popularFiltroImpressorasAuditoria(registros) {
+    const sel = document.getElementById('audImpressora');
+    const atual = sel.value;
+    const nomes = [...new Set(registros.map(r => r.impressora).filter(Boolean))].sort();
+    sel.innerHTML = '<option value="">— Todas as impressoras —</option>' +
+      nomes.map(n => '<option value="' + escHTML(n) + '">' + escHTML(n) + '</option>').join('');
+    if (nomes.includes(atual)) sel.value = atual;
+  }
+
+  function renderAuditoriaPainel(json) {
+    const registros = json.registros || [];
+    const totalPaginas = registros.reduce((soma, r) => soma + Number(r.paginas || 0), 0);
+    const usuariosUnicos = new Set(registros.map(r => r.usuario)).size;
+    let html = '<div class="ficha-grid" style="margin-top:0">';
+    html += '<div class="ficha-item"><div class="ficha-label">Jobs no per&iacute;odo</div><div class="ficha-val">' + Number(json.total || 0).toLocaleString('pt-BR') + '</div></div>';
+    html += '<div class="ficha-item"><div class="ficha-label">P&aacute;ginas no per&iacute;odo</div><div class="ficha-val">' + totalPaginas.toLocaleString('pt-BR') + '</div></div>';
+    html += '<div class="ficha-item"><div class="ficha-label">Usu&aacute;rios distintos</div><div class="ficha-val">' + usuariosUnicos.toLocaleString('pt-BR') + '</div></div>';
+    html += '</div>';
+    if (!registros.length) {
+      html += '<div class="empty-state">Nenhuma impress&atilde;o registrada no per&iacute;odo/filtro selecionado.</div>';
+      return html;
+    }
+    html += '<div class="tbl-wrap"><table><thead><tr><th>Usu&aacute;rio</th><th>Impressora</th><th>Documento</th><th>P&aacute;ginas</th><th>C&oacute;pias</th><th>Esta&ccedil;&atilde;o</th><th>Quando</th></tr></thead><tbody>';
+    registros.forEach(r => {
+      const quando = r.registrado_em ? new Date(String(r.registrado_em).replace(' ', 'T')).toLocaleString('pt-BR') : '-';
+      html += '<tr><td>' + escHTML(r.usuario||'-') + '</td><td>' + escHTML(r.impressora||'-') + '</td><td>' + escHTML(r.documento||'-') + '</td><td>' + (r.paginas ?? '-') + '</td><td>' + (r.copias ?? '-') + '</td><td>' + escHTML(r.hostname_origem||'-') + '</td><td>' + quando + '</td></tr>';
+    });
+    html += '</tbody></table></div>';
+    return html;
+  }
+
+  async function carregarAuditoria() {
+    const div = document.getElementById('auditoria-content');
+    div.innerHTML = '<div class="empty-state">Carregando auditoria de impress&atilde;o...</div>';
+    try {
+      const usuario = document.getElementById('audUsuario').value.trim();
+      const impressora = document.getElementById('audImpressora').value;
+      const params = new URLSearchParams({ dias: periodoAuditoria });
+      if (usuario) params.set('usuario', usuario);
+      if (impressora) params.set('impressora', impressora);
+      const json = await fetchJSON('/api/relatorios/auditoria?' + params.toString());
+      if (!impressora) popularFiltroImpressorasAuditoria(json.registros || []);
+      div.innerHTML = renderAuditoriaPainel(json);
+    } catch(e) {
+      console.error(e);
+      div.innerHTML = '<div class="empty-state">Erro ao carregar auditoria de impress&atilde;o.</div>';
     }
   }
 
