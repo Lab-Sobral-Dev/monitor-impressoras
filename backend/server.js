@@ -1400,6 +1400,33 @@ app.get('/api/relatorios/disponibilidade', exigirPermissao('relatorios'), (req, 
     );
 });
 
+app.get('/api/relatorios/auditoria', exigirPermissao('relatorios'), (req, res, next) => {
+    const diasPermitidos = new Set([7, 30, 90, 180]);
+    const dias = diasPermitidos.has(Number(req.query.dias)) ? Number(req.query.dias) : 7;
+    const condicoes = [`registrado_em >= datetime('now', '-${dias} days')`];
+    const params = [];
+    if (req.query.usuario) {
+        condicoes.push('usuario LIKE ?');
+        params.push(`%${req.query.usuario}%`);
+    }
+    if (req.query.impressora) {
+        condicoes.push('impressora = ?');
+        params.push(req.query.impressora);
+    }
+    db.all(
+        `SELECT impressora, usuario, paginas, copias, hostname_origem, documento, registrado_em
+         FROM impressoes
+         WHERE ${condicoes.join(' AND ')}
+         ORDER BY registrado_em DESC
+         LIMIT 500`,
+        params,
+        (err, rows) => {
+            if (err) return next(err);
+            res.json({ total: rows.length, registros: rows });
+        }
+    );
+});
+
 app.get('/api/relatorios/estoque', exigirPermissao('relatorios'), (req, res, next) => {
     db.all(
         `SELECT e.modelo, e.insumo, e.quantidade AS estoque_atual,
