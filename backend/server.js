@@ -379,9 +379,11 @@ const dbReady = new Promise(resolve => {
         )`);
         db.run(`CREATE TABLE IF NOT EXISTS impressoes_cursor (
             id INTEGER PRIMARY KEY CHECK (id = 1),
-            last_line INTEGER NOT NULL DEFAULT 0
+            last_line INTEGER NOT NULL DEFAULT 0,
+            last_line_jobpages INTEGER NOT NULL DEFAULT 0
         )`);
-        db.run(`INSERT OR IGNORE INTO impressoes_cursor (id, last_line) VALUES (1, 0)`);
+        db.run(`ALTER TABLE impressoes_cursor ADD COLUMN last_line_jobpages INTEGER NOT NULL DEFAULT 0`, () => {});
+        db.run(`INSERT OR IGNORE INTO impressoes_cursor (id, last_line, last_line_jobpages) VALUES (1, 0, 0)`);
         db.run('SELECT 1', resolve);
     });
 });
@@ -616,6 +618,13 @@ async function coletarHistorico() {
 // ── Auditoria de impressão por usuário (page_log do CUPS, PRINTSRV/.216) ───────
 // Formato da linha (PageLogFormat customizado no PRINTSRV):
 // printer|user|job-id|date-time|page-num|copies|job-originating-host-name|job-name
+function numeroOuNull(v) {
+    // Number(v) || null trataria 0 como ausente -- 0 é valor real (ex.: job_pages.log
+    // registra 0 página quando o job nunca chegou a imprimir de fato).
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+}
+
 function parsePageLogLine(linha) {
     // CUPS envolve a linha inteira em aspas quando o PageLogFormat é customizado.
     const semAspas = String(linha).replace(/^"|"$/g, '');
@@ -626,17 +635,17 @@ function parsePageLogLine(linha) {
     return {
         impressora,
         usuario,
-        jobId: Number(jobId) || null,
-        pagina: Number(pagina) || null,
-        copias: Number(copias) || null,
+        jobId: numeroOuNull(jobId),
+        pagina: numeroOuNull(pagina),
+        copias: numeroOuNull(copias),
         hostname,
         documento
     };
 }
 
-function buscarPageLog(sinceLine) {
+function buscarLogRemoto(caminho, sinceLine) {
     return new Promise((resolve) => {
-        const url = `${PAGELOG_API_URL}/api/pagelog?since_line=${sinceLine}`;
+        const url = `${PAGELOG_API_URL}${caminho}?since_line=${sinceLine}`;
         const req = http.get(url, { headers: { 'X-API-Key': PAGELOG_API_TOKEN }, timeout: 5000 }, (res) => {
             let data = '';
             res.on('data', (chunk) => { data += chunk; });
@@ -650,29 +659,67 @@ function buscarPageLog(sinceLine) {
     });
 }
 
+function buscarPageLog(sinceLine) {
+    return buscarLogRemoto('/api/pagelog', sinceLine);
+}
+
+function buscarJobPages(sinceLine) {
+    return buscarLogRemoto('/api/jobpages', sinceLine);
+}
+
 async function coletarImpressoes() {
     if (!PAGELOG_API_URL || !PAGELOG_API_TOKEN) return;
 
-    db.get('SELECT last_line FROM impressoes_cursor WHERE id = 1', [], async (err, row) => {
-        if (err) return;
-        const cursor = row ? row.last_line : 0;
-        const resultado = await buscarPageLog(cursor);
-        if (!resultado || !Array.isArray(resultado.lines)) return;
+    const cursor = await new Promise((resolve, reject) => {
+        db.get('SELECT last_line, last_line_jobpages FROM impressoes_cursor WHERE id = 1', [],
+            (err, row) => err ? reject(err) : resolve(row || { last_line: 0, last_line_jobpages: 0 }));
+    });
 
-        for (const linha of resultado.lines) {
+    const [pageLog, jobPages] = await Promise.all([
+        buscarPageLog(cursor.last_line),
+        buscarJobPages(cursor.last_line_jobpages)
+    ]);
+
+    // job_pages.log (backend SNMP 'pagecount') tem a contagem real de página/cópia.
+    // O page_log nativo do CUPS, pra fila raw, grava o literal "total" no lugar do
+    // número de página -- nunca conta de verdade. Indexa por impressora+job pra
+    // sobrescrever pagina/copias do page_log com o valor real quando existir.
+    const contagemReal = new Map();
+    if (jobPages && Array.isArray(jobPages.lines)) {
+        for (const linha of jobPages.lines) {
+            const p = parsePageLogLine(linha);
+            if (!p || p.jobId === null) continue;
+            contagemReal.set(`${p.impressora}::${p.jobId}`, p);
+        }
+    }
+
+    if (pageLog && Array.isArray(pageLog.lines)) {
+        for (const linha of pageLog.lines) {
             const p = parsePageLogLine(linha);
             if (!p) continue;
-            db.run(
-                `INSERT INTO impressoes (impressora, usuario, job_id, paginas, copias, hostname_origem, documento)
-                 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-                [p.impressora, p.usuario, p.jobId, p.pagina, p.copias, p.hostname, p.documento]
-            );
+            const real = p.jobId !== null ? contagemReal.get(`${p.impressora}::${p.jobId}`) : null;
+            const paginas = real ? real.pagina : p.pagina;
+            const copias = real ? real.copias : p.copias;
+            await new Promise((resolve, reject) => {
+                db.run(
+                    `INSERT INTO impressoes (impressora, usuario, job_id, paginas, copias, hostname_origem, documento)
+                     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+                    [p.impressora, p.usuario, p.jobId, paginas, copias, p.hostname, p.documento],
+                    (err) => err ? reject(err) : resolve()
+                );
+            });
         }
+    }
 
-        if (typeof resultado.total_lines === 'number' && resultado.total_lines !== cursor) {
-            db.run('UPDATE impressoes_cursor SET last_line = ? WHERE id = 1', [resultado.total_lines]);
-        }
-    });
+    const novoLastLine = (pageLog && typeof pageLog.total_lines === 'number') ? pageLog.total_lines : cursor.last_line;
+    const novoLastLineJobpages = (jobPages && typeof jobPages.total_lines === 'number') ? jobPages.total_lines : cursor.last_line_jobpages;
+
+    if (novoLastLine !== cursor.last_line || novoLastLineJobpages !== cursor.last_line_jobpages) {
+        await new Promise((resolve, reject) => {
+            db.run('UPDATE impressoes_cursor SET last_line = ?, last_line_jobpages = ? WHERE id = 1',
+                [novoLastLine, novoLastLineJobpages], (err) => err ? reject(err) : resolve());
+        });
+    }
 }
 
 // ── Descoberta de dispositivo via SNMP ────────────────────────────────────────
@@ -1462,7 +1509,7 @@ app.use((err, req, res, next) => {
     res.status(500).json({ erro: 'Erro interno do servidor' });
 });
 
-module.exports = { app, db, dbReady, estoqueTokens, parsePageLogLine };
+module.exports = { app, db, dbReady, estoqueTokens, parsePageLogLine, coletarImpressoes };
 
 // ── Inicialização e graceful shutdown (apenas quando executado diretamente) ────
 if (require.main === module) {
