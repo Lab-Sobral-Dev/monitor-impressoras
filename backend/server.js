@@ -16,8 +16,13 @@ const {
 } = require('./lib/leitura-impressora');
 const { gerarPDF } = require('./lib/pdf');
 const {
-    DIA_MS, detectarLeituraParada, preverFimDosSuprimentos, consumoDiarioPorImpressora, horasDoExpediente
+    DIA_MS, detectarLeituraParada, preverFimDosSuprimentos, consumoDiarioPorImpressora, paginasPorPeriodo,
+    horasDoExpediente
 } = require('./lib/analise-historico');
+
+// Fuso dos relatórios (dias, horas e expediente): Fortaleza = -3
+const FUSO_HORAS   = Number.parseInt(process.env.FUSO_HORARIO_HORAS ?? '-3', 10) || 0;
+const FUSO_HORARIO = `${FUSO_HORAS} hours`; // modificador de data do SQLite
 
 const app = express();
 
@@ -1113,38 +1118,42 @@ app.get('/api/relatorios/impressoras', exigirPermissao('relatorios'), (req, res,
     });
 });
 
-app.get('/api/relatorios/paginas/:id', exigirPermissao('relatorios'), (req, res, next) => {
-    const fmtMap = { hora: '%Y-%m-%dT%H:00', dia: '%Y-%m-%d', mes: '%Y-%m', ano: '%Y' };
-    const janMap = { hora: '-2 days', dia: '-30 days', mes: '-12 months', ano: '-5 years' };
-    const fmt = fmtMap[req.query.periodo] || fmtMap.dia;
-    const jan = janMap[req.query.periodo] || janMap.dia;
-    db.all(
-        `SELECT strftime('${fmt}', coletado_em) AS periodo,
-                MAX(paginas_total) - MIN(paginas_total) AS paginas_impressas
-         FROM historico_paginas
-         WHERE impressora_id = ? AND coletado_em >= datetime('now', '${jan}')
-         GROUP BY strftime('${fmt}', coletado_em)
-         ORDER BY periodo ASC`,
-        [req.params.id], (err, rows) => {
-            if (err) return next(err);
-            const periodos = rows.filter(r => (r.paginas_impressas || 0) > 0);
-            db.get('SELECT MAX(paginas_total) AS total FROM historico_paginas WHERE impressora_id = ?',
-                [req.params.id], (err2, meta) => {
-                    res.json({ periodos, total_atual: meta ? meta.total : null });
-                });
-        }
-    );
+const JANELA_PAGINAS_DIAS = { hora: 2, dia: 30, mes: 365, ano: 5 * 365 };
+
+app.get('/api/relatorios/paginas/:id', exigirPermissao('relatorios'), async (req, res, next) => {
+    try {
+        const periodo = JANELA_PAGINAS_DIAS[req.query.periodo] ? req.query.periodo : 'dia';
+        const desde = Date.now() - JANELA_PAGINAS_DIAS[periodo] * DIA_MS;
+        const desdeIso = new Date(desde).toISOString();
+        // A última leitura antes da janela entra só como base da primeira diferença
+        const [anterior, leituras, ultima] = await Promise.all([
+            consultarTodos(`SELECT paginas_total AS total, coletado_em AS em FROM historico_paginas
+                            WHERE impressora_id = ? AND coletado_em < ? ORDER BY coletado_em DESC LIMIT 1`, [req.params.id, desdeIso]),
+            consultarTodos(`SELECT paginas_total AS total, coletado_em AS em FROM historico_paginas
+                            WHERE impressora_id = ? AND coletado_em >= ?`, [req.params.id, desdeIso]),
+            consultarTodos(`SELECT paginas_total AS total FROM historico_paginas
+                            WHERE impressora_id = ? ORDER BY coletado_em DESC LIMIT 1`, [req.params.id])
+        ]);
+        const pontos = [...anterior, ...leituras].map(l => ({ total: l.total, em: Date.parse(l.em) }));
+        res.json({
+            periodos: paginasPorPeriodo(pontos, periodo, FUSO_HORAS, desde),
+            // Contador da leitura mais recente (o maior de todos podia ser de um aparelho anterior no mesmo IP)
+            total_atual: ultima[0]?.total ?? null
+        });
+    } catch (e) {
+        next(e);
+    }
 });
 
 app.get('/api/relatorios/tinta/:id', exigirPermissao('relatorios'), (req, res, next) => {
     db.all(
         `SELECT cor,
-                strftime('%Y-%m-%d', coletado_em) AS dia,
+                strftime('%Y-%m-%d', coletado_em, '${FUSO_HORARIO}') AS dia,
                 ROUND(AVG(percentual)) AS percentual_medio,
                 MIN(percentual) AS percentual_min
          FROM historico_tinta
          WHERE impressora_id = ? AND coletado_em >= datetime('now', '-30 days')
-         GROUP BY cor, strftime('%Y-%m-%d', coletado_em)
+         GROUP BY cor, strftime('%Y-%m-%d', coletado_em, '${FUSO_HORARIO}')
          ORDER BY dia ASC, cor ASC`,
         [req.params.id], (err, rows) => {
             if (err) return next(err);
@@ -1261,7 +1270,6 @@ const HORAS_EXPEDIENTE = (() => {
     const horas = horasDoExpediente(process.env.EXPEDIENTE || '08-12,14-17');
     return horas.length ? horas : horasDoExpediente('08-12,14-17');
 })();
-const FUSO_HORARIO = `${Number.parseInt(process.env.FUSO_HORARIO_HORAS ?? '-3', 10) || 0} hours`;
 const NO_EXPEDIENTE = `(strftime('%w', h.registrado_em, '${FUSO_HORARIO}') BETWEEN '1' AND '5'
     AND CAST(strftime('%H', h.registrado_em, '${FUSO_HORARIO}') AS INTEGER) IN (${HORAS_EXPEDIENTE.join(',')}))`;
 

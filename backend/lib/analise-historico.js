@@ -108,6 +108,43 @@ function consumoDiarioPorImpressora(historico) {
     return consumo;
 }
 
+// Chave do período no horário local: hora "2026-10-15T14:00", dia "2026-10-15",
+// mês "2026-10", ano "2026"
+const TAMANHO_CHAVE = { dia: 10, mes: 7, ano: 4 };
+
+function chavePeriodo(ms, periodo, fusoHoras) {
+    const local = new Date(ms + fusoHoras * 60 * 60 * 1000).toISOString();
+    return periodo === 'hora' ? `${local.slice(0, 13)}:00` : local.slice(0, TAMANHO_CHAVE[periodo] ?? 10);
+}
+
+// Páginas impressas por período a partir das leituras do contador total.
+// Soma a diferença entre leituras consecutivas e atribui ao período da leitura
+// mais recente. (O cálculo antigo — maior menos menor dentro de cada período —
+// perdia as páginas entre um período e o seguinte e zerava a visão por hora,
+// já que a coleta é horária.) Saltos negativos ou enormes = contador de outro
+// aparelho (troca no mesmo IP) e são ignorados.
+// Diferenças entre leituras muito distantes (servidor ou impressora fora por
+// dias) cairiam inteiras num único período; acima desse intervalo são ignoradas.
+// 4 dias cobre noites e fins de semana.
+const LACUNA_MAXIMA_DIAS = { hora: 4, dia: 4, mes: 31, ano: 366 };
+
+// leituras: [{ total, em (ms) }]; desde: só conta leituras a partir desse instante
+function paginasPorPeriodo(leituras, periodo, fusoHoras = 0, desde = 0) {
+    const ordenadas = leituras.filter(l => l.total !== null && l.total !== undefined).sort((a, b) => a.em - b.em);
+    const lacunaMaxima = (LACUNA_MAXIMA_DIAS[periodo] ?? 4) * DIA_MS;
+    const soma = new Map();
+    for (let i = 1; i < ordenadas.length; i++) {
+        const atual = ordenadas[i];
+        const anterior = ordenadas[i - 1];
+        if (atual.em < desde || atual.em - anterior.em > lacunaMaxima) continue;
+        const delta = atual.total - anterior.total;
+        if (delta <= 0 || delta > SALTO_MAXIMO_CONTADOR) continue;
+        const chave = chavePeriodo(atual.em, periodo, fusoHoras);
+        soma.set(chave, (soma.get(chave) || 0) + delta);
+    }
+    return [...soma].sort(([a], [b]) => a.localeCompare(b)).map(([p, paginas]) => ({ periodo: p, paginas_impressas: paginas }));
+}
+
 // Faixas "08-12,14-17" → horas cheias do expediente [8, 9, 10, 11, 14, 15, 16]
 function horasDoExpediente(texto) {
     const horas = new Set();
@@ -124,5 +161,7 @@ module.exports = {
     detectarLeituraParada,
     preverFimDosSuprimentos,
     consumoDiarioPorImpressora,
+    paginasPorPeriodo,
+    chavePeriodo,
     horasDoExpediente
 };
