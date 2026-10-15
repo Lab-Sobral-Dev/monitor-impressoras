@@ -7,6 +7,8 @@
 //   4. .156 Microbiológico : HP 4103fdw passa a ser conexão USB (sem IP, sem monitoramento)
 //   5. Padroniza os nomes de localização (espaço sobrando, acentos, maiúsculas), para que
 //      o mesmo setor não apareça duas vezes nos filtros e agrupamentos
+//   6. Apaga do estoque o grupo antigo "Canon GX7010" — as Canon GX usam o grupo
+//      "Canon GX6010 / GX7010"; o antigo não aparecia em tela nenhuma (decisão de 15/10/2026)
 //
 // Rodar DEPOIS de subir a versão com nº de série e conexão USB (o servidor cria
 // as colunas numero_serie e conexao ao iniciar).
@@ -49,6 +51,9 @@ const LOCALIZACOES = [
     { de: 'Produção ',             para: 'Produção' },
     { de: 'Sistema de qualidade ', para: 'Sistema de qualidade' },
 ];
+
+// Grupos do estoque que não são mais usados por nenhuma impressora
+const GRUPOS_ESTOQUE_REMOVIDOS = ['Canon GX7010'];
 
 const INCLUSOES = [
     {
@@ -112,6 +117,14 @@ async function main() {
             alteradas++;
             const cols = Object.keys(n.campos);
             await run(`INSERT INTO impressoras (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`, Object.values(n.campos));
+        }
+
+        for (const grupo of GRUPOS_ESTOQUE_REMOVIDOS) {
+            const itens = await all('SELECT insumo, quantidade, estado FROM estoque WHERE modelo = ?', [grupo]);
+            if (!itens.length) { console.log(`· Estoque "${grupo}": já removido`); continue; }
+            console.log(`→ Estoque "${grupo}": apagar ${itens.map(i => `${i.insumo} ${i.quantidade}${i.estado && i.estado !== 'Novo' ? ` (${i.estado})` : ''}`).join(', ')}`);
+            alteradas += itens.length;
+            await run('DELETE FROM estoque WHERE modelo = ?', [grupo]);
         }
 
         await run(APLICAR ? 'COMMIT' : 'ROLLBACK');
