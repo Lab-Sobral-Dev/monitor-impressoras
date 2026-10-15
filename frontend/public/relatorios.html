@@ -689,7 +689,8 @@
     try {
       const dados = await fetchJSON('/api/relatorios/disponibilidade');
       if (!dados.length) { div.innerHTML = '<div class="empty-state">Nenhuma impressora cadastrada.</div>'; return; }
-      let html = '<div class="tbl-wrap" style="margin-bottom:20px"><table><thead><tr><th>Impressora</th><th>IP</th><th>Localiza&ccedil;&atilde;o</th><th>Uptime (30d)</th><th>&Uacute;ltimo offline</th></tr></thead><tbody>';
+      let html = '<p style="font-size:12px;color:var(--mt);margin:0 0 12px;line-height:1.5">Disponibilidade medida no expediente (segunda a sexta, hor&aacute;rio comercial), nos &uacute;ltimos 30 dias. Impressora desligada &agrave; noite, no fim de semana ou no almo&ccedil;o n&atilde;o conta como indispon&iacute;vel. O valor de 24h aparece como refer&ecirc;ncia.</p>';
+      html += '<div class="tbl-wrap" style="margin-bottom:20px"><table><thead><tr><th>Impressora</th><th>IP</th><th>Localiza&ccedil;&atilde;o</th><th>No expediente (30d)</th><th>&Uacute;ltimo offline no expediente</th></tr></thead><tbody>';
       dados.forEach(d => {
         const pct = d.uptime_pct != null ? d.uptime_pct :
           (d.total_checkins > 0 ? Math.round(100*d.checkins_online/d.total_checkins) : null);
@@ -699,10 +700,10 @@
           :             '<span class="badge-no">' + pct + '%</span>';
         const offline = d.ultimo_offline ? new Date(d.ultimo_offline).toLocaleString('pt-BR')
           : d.total_checkins > 0 ? '&mdash; sempre online' : '&mdash;';
-        html += '<tr><td><strong>' + escHTML(d.nome) + '</strong></td><td style="color:var(--accent)">' + escHTML(d.ip) + '</td><td>' + escHTML(d.localizacao||'—') + '</td><td>' + badge + ' <span style="font-size:11px;color:var(--mt)">(' + (d.total_checkins||0) + ' coletas)</span></td><td style="font-size:12px;color:var(--mt)">' + offline + '</td></tr>';
+        html += '<tr><td><strong>' + escHTML(d.nome) + '</strong></td><td style="color:var(--accent)">' + escHTML(d.ip) + '</td><td>' + escHTML(d.localizacao||'—') + '</td><td>' + badge + ' <span style="font-size:11px;color:var(--mt)">(' + (d.total_checkins||0) + ' coletas' + (d.uptime_24h_pct != null ? ' · 24h: ' + d.uptime_24h_pct + '%' : '') + ')</span></td><td style="font-size:12px;color:var(--mt)">' + offline + '</td></tr>';
       });
       html += '</tbody></table></div>';
-      html += '<div class="chart-wrap"><div class="chart-title">Uptime por impressora</div><div class="up-bar-wrap">';
+      html += '<div class="chart-wrap"><div class="chart-title">Disponibilidade no expediente por impressora</div><div class="up-bar-wrap">';
       dados.forEach(d => {
         const pct = d.uptime_pct != null ? d.uptime_pct :
           (d.total_checkins > 0 ? Math.round(100*d.checkins_online/d.total_checkins) : 0);
@@ -1139,7 +1140,7 @@
     });
     const media = calculados.length ? Math.round(calculados.reduce((acc, d) => acc + Number(d.pct || 0), 0) / calculados.length) : 0;
     let html = metricCards([
-      { label:'Uptime médio', value:media + '%', cls:media >= 90 ? 'ok' : media >= 60 ? 'wn' : 'no' },
+      { label:'Média no expediente', value:media + '%', cls:media >= 90 ? 'ok' : media >= 60 ? 'wn' : 'no' },
       { label:'Coletas', value:calculados.reduce((acc, d) => acc + Number(d.total_checkins || 0), 0).toLocaleString('pt-BR') },
       { label:'Abaixo de 90%', value:calculados.filter(d => Number(d.pct || 0) < 90).length, cls:'wn' },
       { label:'Sem dados', value:calculados.filter(d => d.pct == null).length }
@@ -1151,7 +1152,7 @@
       display: d.pct == null ? 'Sem dados' : d.pct + '%',
       color: d.pct >= 90 ? '#10b981' : d.pct >= 60 ? '#f59e0b' : '#ef4444'
     })), { max:100 });
-    return { titulo:'Disponibilidade', html };
+    return { titulo:'Disponibilidade no expediente (seg–sex, horário comercial, 30 dias)', html };
   }
 
   async function montarEstoque() {

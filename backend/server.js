@@ -1688,13 +1688,41 @@ app.post('/api/relatorios/trocas-toner', exigirPermissao('relatorios'), (req, re
     });
 });
 
+// ── Expediente (base da disponibilidade) ──────────────────────────────────────
+// As impressoras são desligadas à noite, no fim de semana e (algumas) no
+// almoço; medir 24h fazia todas parecerem indisponíveis. A disponibilidade
+// considera só seg–sex dentro de EXPEDIENTE ("08-12,14-17" = 8h–12h e 14h–17h),
+// no fuso FUSO_HORARIO_HORAS (Fortaleza = -3). O valor 24h segue como referência.
+function horasDoExpediente(texto) {
+    const horas = new Set();
+    for (const faixa of String(texto || '').split(',')) {
+        const m = /^\s*(\d{1,2})\s*-\s*(\d{1,2})\s*$/.exec(faixa);
+        if (!m) continue;
+        for (let h = Number(m[1]); h < Number(m[2]) && h < 24; h++) horas.add(h);
+    }
+    return [...horas].sort((a, b) => a - b);
+}
+
+const HORAS_EXPEDIENTE = (() => {
+    const horas = horasDoExpediente(process.env.EXPEDIENTE || '08-12,14-17');
+    return horas.length ? horas : horasDoExpediente('08-12,14-17');
+})();
+const FUSO_HORARIO = `${Number.parseInt(process.env.FUSO_HORARIO_HORAS ?? '-3', 10) || 0} hours`;
+const NO_EXPEDIENTE = `(strftime('%w', h.registrado_em, '${FUSO_HORARIO}') BETWEEN '1' AND '5'
+    AND CAST(strftime('%H', h.registrado_em, '${FUSO_HORARIO}') AS INTEGER) IN (${HORAS_EXPEDIENTE.join(',')}))`;
+
 app.get('/api/relatorios/disponibilidade', exigirPermissao('relatorios'), (req, res, next) => {
     db.all(
         `SELECT i.id, i.nome, i.ip, i.modelo, i.localizacao,
-                COUNT(h.id) AS total_checkins,
-                SUM(COALESCE(h.online, 0)) AS checkins_online,
-                ROUND(100.0 * SUM(COALESCE(h.online, 0)) / MAX(COUNT(h.id), 1), 1) AS uptime_pct,
-                MAX(CASE WHEN h.online = 0 THEN h.registrado_em END) AS ultimo_offline
+                SUM(CASE WHEN ${NO_EXPEDIENTE} THEN 1 ELSE 0 END) AS total_checkins,
+                SUM(CASE WHEN ${NO_EXPEDIENTE} THEN h.online ELSE 0 END) AS checkins_online,
+                CASE WHEN SUM(CASE WHEN ${NO_EXPEDIENTE} THEN 1 ELSE 0 END) = 0 THEN NULL
+                     ELSE ROUND(100.0 * SUM(CASE WHEN ${NO_EXPEDIENTE} THEN h.online ELSE 0 END)
+                                / SUM(CASE WHEN ${NO_EXPEDIENTE} THEN 1 ELSE 0 END), 1) END AS uptime_pct,
+                COUNT(h.id) AS total_checkins_24h,
+                CASE WHEN COUNT(h.id) = 0 THEN NULL
+                     ELSE ROUND(100.0 * SUM(COALESCE(h.online, 0)) / COUNT(h.id), 1) END AS uptime_24h_pct,
+                MAX(CASE WHEN h.online = 0 AND ${NO_EXPEDIENTE} THEN h.registrado_em END) AS ultimo_offline
          FROM impressoras i
          LEFT JOIN historico_status h
                 ON h.impressora_id = i.id AND h.registrado_em >= datetime('now', '-30 days')
@@ -1770,7 +1798,7 @@ app.use((err, req, res, next) => {
 });
 
 module.exports = { app, db, dbReady, estoqueTokens, parsePageLogLine, coletarImpressoes, interpretarSuprimentos, serieDivergente, verificarPresencaNaRede, interpretarConsumiveisHP, interpretarSuprimentosHPWeb,
-    detectarLeituraParada, atualizarLeiturasParadas, limparHistoricoAntigo };
+    detectarLeituraParada, atualizarLeiturasParadas, limparHistoricoAntigo, horasDoExpediente };
 
 // ── Inicialização e graceful shutdown (apenas quando executado diretamente) ────
 if (require.main === module) {

@@ -623,3 +623,47 @@ describe('GET /api/auth/sso', () => {
         expect(resposta.status).toBe(503);
     });
 });
+
+// -- Disponibilidade no expediente --------------------------------------------
+describe('GET /api/relatorios/disponibilidade (expediente)', () => {
+    const { horasDoExpediente } = require('../server');
+
+    it('interpreta as faixas de horario do expediente', () => {
+        expect(horasDoExpediente('08-12,14-17')).toEqual([8, 9, 10, 11, 14, 15, 16]);
+        expect(horasDoExpediente('7-9')).toEqual([7, 8]);
+        expect(horasDoExpediente('lixo')).toEqual([]);
+    });
+
+    it('conta so seg-sex no expediente; desligar a noite e no fim de semana nao derruba o indice', async () => {
+        const id = await criarImpressora();
+        // Segunda-feira da semana passada (horario de Fortaleza, UTC-3)
+        const seg = new Date();
+        seg.setUTCDate(seg.getUTCDate() - 7 - ((seg.getUTCDay() + 6) % 7));
+        const em = (diasDepois, horaLocal) => {
+            const d = new Date(Date.UTC(seg.getUTCFullYear(), seg.getUTCMonth(), seg.getUTCDate() + diasDepois, horaLocal + 3, 40));
+            return d.toISOString();
+        };
+        const status = [
+            [em(0, 10), 1], // segunda 10:40 - expediente, online
+            [em(0, 15), 1], // segunda 15:40 - expediente, online
+            [em(0, 22), 0], // segunda 22:40 - fora do expediente, desligada
+            [em(0, 12), 0], // segunda 12:40 - almoco, desligada
+            [em(5, 10), 0], // sabado 10:40 - fim de semana, desligada
+        ];
+        for (const [quando, online] of status) {
+            await runDB('INSERT INTO historico_status (impressora_id, online, registrado_em) VALUES (?, ?, ?)', [id, online, quando]);
+        }
+        const res = await request(app).get('/api/relatorios/disponibilidade').set(await authAdmin());
+        expect(res.status).toBe(200);
+        expect(res.body[0]).toMatchObject({
+            total_checkins: 2, checkins_online: 2, uptime_pct: 100, ultimo_offline: null,
+            total_checkins_24h: 5, uptime_24h_pct: 40
+        });
+    });
+
+    it('sem coletas no expediente fica sem dados (null), nao 0%', async () => {
+        await criarImpressora();
+        const res = await request(app).get('/api/relatorios/disponibilidade').set(await authAdmin());
+        expect(res.body[0].uptime_pct).toBeNull();
+    });
+});
