@@ -195,7 +195,7 @@
     showMsg('', '');
 
     try {
-      const res = await fetch(`/api/descobrir?ip=${encodeURIComponent(ip)}`);
+      const res = await fetch(`/api/descobrir?ip=${encodeURIComponent(ip)}`, { headers: authHeaders() });
       if (!res.ok) { showMsg('Erro ao consultar o dispositivo.', 'err'); return; }
       const data = await res.json();
 

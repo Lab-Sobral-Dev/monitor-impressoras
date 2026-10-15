@@ -1490,7 +1490,7 @@ app.post('/api/impressoras/:id/imprimir', exigirPermissao('imprimir'), (req, res
     });
 });
 
-app.get('/api/descobrir', limiterDescoberta, async (req, res, next) => {
+app.get('/api/descobrir', limiterDescoberta, exigirPermissao('impressoras'), async (req, res, next) => {
     const ip = String(req.query.ip || '').trim();
     if (!IPV4_RE.test(ip)) return res.status(400).json({ erro: 'IP inválido' });
     try {

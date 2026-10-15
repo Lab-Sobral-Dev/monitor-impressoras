@@ -26,6 +26,13 @@ jest.mock('net-snmp', () => ({
 
 const request  = require('supertest');
 const { app, db, dbReady } = require('../server');
+const { entrarViaSSO } = require('./sso');
+
+// A descoberta exige login com permissão de impressoras
+async function descobrir(consulta = '') {
+    const { token } = await entrarViaSSO(app);
+    return request(app).get('/api/descobrir' + consulta).set('Authorization', `Bearer ${token}`);
+}
 
 const SUP = '1.3.6.1.2.1.43.11.1.1';
 
@@ -88,20 +95,25 @@ afterAll(() => new Promise(resolve => db.close(resolve)));
 afterEach(() => { mockAgente = null; });
 
 describe('GET /api/descobrir', () => {
+    it('deve exigir login (antes era a única rota aberta)', async () => {
+        const res = await request(app).get('/api/descobrir?ip=192.168.1.50');
+        expect(res.status).toBe(401);
+    });
+
     it('deve retornar 400 quando ip ausente', async () => {
-        const res = await request(app).get('/api/descobrir');
+        const res = await descobrir('');
         expect(res.status).toBe(400);
         expect(res.body.erro).toMatch(/IP/i);
     });
 
     it('deve retornar 400 quando ip inválido', async () => {
-        const res = await request(app).get('/api/descobrir?ip=999.0.0.1');
+        const res = await descobrir('?ip=999.0.0.1');
         expect(res.status).toBe(400);
         expect(res.body.erro).toMatch(/IP/i);
     });
 
     it('deve retornar online:false e campos vazios quando SNMP não responde', async () => {
-        const res = await request(app).get('/api/descobrir?ip=192.168.1.50');
+        const res = await descobrir('?ip=192.168.1.50');
         expect(res.status).toBe(200);
         expect(res.body.online).toBe(false);
         expect(res.body.fabricante).toBe('');
@@ -111,7 +123,7 @@ describe('GET /api/descobrir', () => {
 
     it('deve detectar fabricante Canon, tipo Colorido, Toner e o número de série', async () => {
         mockAgente = CANON_COLORIDA;
-        const res = await request(app).get('/api/descobrir?ip=192.168.1.50');
+        const res = await descobrir('?ip=192.168.1.50');
         expect(res.status).toBe(200);
         expect(res.body).toMatchObject({
             online: true, fabricante: 'Canon', modelo: 'Canon MF650C Series',
@@ -121,28 +133,28 @@ describe('GET /api/descobrir', () => {
 
     it('deve detectar impressora monocromática (antes falhava: OIDs de cor inexistentes derrubavam a consulta)', async () => {
         mockAgente = HP_MONO;
-        const res = await request(app).get('/api/descobrir?ip=192.168.1.50');
+        const res = await descobrir('?ip=192.168.1.50');
         expect(res.status).toBe(200);
         expect(res.body).toMatchObject({ online: true, fabricante: 'HP', tipo: 'Mono', material: 'Toner', numero_serie: 'BRBSR520T0' });
     });
 
     it('deve detectar material Tinta pelo tipo de suprimento', async () => {
         mockAgente = EPSON_TINTA;
-        const res = await request(app).get('/api/descobrir?ip=192.168.1.50');
+        const res = await descobrir('?ip=192.168.1.50');
         expect(res.status).toBe(200);
         expect(res.body).toMatchObject({ fabricante: 'Epson', tipo: 'Colorido', material: 'Tinta' });
     });
 
     it('deve detectar Samsung mono sem confundir fusor com cor', async () => {
         mockAgente = SAMSUNG_MONO;
-        const res = await request(app).get('/api/descobrir?ip=192.168.1.50');
+        const res = await descobrir('?ip=192.168.1.50');
         expect(res.status).toBe(200);
         expect(res.body).toMatchObject({ fabricante: 'Samsung', tipo: 'Mono', material: 'Toner', numero_serie: 'ZDDPB07K913WRZY' });
     });
 
     it('deve usar o texto do modelo quando a impressora não tem tabela de suprimentos', async () => {
         mockAgente = impressora({ descr: 'Brother HL-L2350DW laser', modelo: 'Brother HL-L2350DW' });
-        const res = await request(app).get('/api/descobrir?ip=192.168.1.50');
+        const res = await descobrir('?ip=192.168.1.50');
         expect(res.status).toBe(200);
         expect(res.body).toMatchObject({ online: true, fabricante: 'Brother', tipo: 'Mono', material: 'Toner', numero_serie: '' });
     });
