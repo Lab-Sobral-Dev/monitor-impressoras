@@ -112,31 +112,6 @@ function validarEstoque(body) {
     return erros;
 }
 
-// ── Tokens de estoque (memória, TTL 5 min) ────────────────────────────────────
-const estoqueTokens = new Map();
-
-function gerarTokenEstoque() {
-    const token = crypto.randomBytes(24).toString('hex');
-    estoqueTokens.set(token, Date.now() + 5 * 60 * 1000);
-    return token;
-}
-
-function verificarTokenEstoque(req, res, next) {
-    const auth  = req.headers['authorization'] || '';
-    const token = auth.startsWith('Bearer ') ? auth.slice(7) : '';
-    const exp   = estoqueTokens.get(token);
-    if (!exp || Date.now() > exp) return res.status(401).json({ erro: 'Não autorizado' });
-    next();
-}
-
-// Remove tokens expirados da memória a cada minuto
-setInterval(() => {
-    const now = Date.now();
-    for (const [token, exp] of estoqueTokens) {
-        if (now > exp) estoqueTokens.delete(token);
-    }
-}, 60_000).unref();
-
 // ── Cache do dashboard ────────────────────────────────────────────────────────
 let dashCache     = null;
 let dashCacheAt   = 0;
@@ -317,14 +292,6 @@ function provisionarUsuarioAcoplado(sub, nomeExibicao) {
             } catch (e) { reject(e); }
         });
     });
-}
-
-// ── Credencial de estoque ─────────────────────────────────────────────────────
-let ESTOQUE_SENHA = process.env.ESTOQUE_SENHA;
-if (!ESTOQUE_SENHA) {
-    ESTOQUE_SENHA = crypto.randomBytes(16).toString('hex');
-    console.warn('⚠️  ESTOQUE_SENHA não definida. Token temporário gerado para esta sessão.');
-    console.warn('   Defina a variável de ambiente para acesso persistente ao estoque.');
 }
 
 // ── Banco de dados ────────────────────────────────────────────────────────────
@@ -786,7 +753,7 @@ app.get('/api/dashboard', exigirAlgumaPermissao(['dashboard', 'estoque']), (req,
 app.get('/api/impressoras', exigirAlgumaPermissao(['impressoras', 'estoque', 'relatorios']), (req, res, next) => {
     db.all('SELECT id, nome AS fabricante, ip, modelo, localizacao, comunidade, tipo, material, numero_serie, conexao, estoque_modelo FROM impressoras ORDER BY id ASC', [], (err, rows) => {
         if (err) return next(err);
-        res.json(rows);
+        res.json(rows.map(r => ({ ...r, estoque_modelo_efetivo: modeloDeEstoque(r) })));
     });
 });
 
@@ -880,6 +847,45 @@ app.post('/api/estoque', exigirPermissao('estoque'), (req, res, next) => {
             res.status(201).json({ sucesso: true });
         }
     );
+});
+
+// Ajuste relativo (+1 / −1) feito no banco: a tela antes gravava a quantidade
+// que estava exibindo, e um ajuste de outra pessoa (ou página desatualizada)
+// era sobrescrito.
+app.post('/api/estoque/ajuste', exigirPermissao('estoque'), async (req, res, next) => {
+    const { modelo, insumo } = req.body;
+    const delta = Number(req.body.delta);
+    const estado = req.body.estado || 'Novo';
+    if (!modelo || typeof modelo !== 'string' || !insumo || typeof insumo !== 'string') {
+        return res.status(400).json({ erro: 'modelo e insumo são obrigatórios' });
+    }
+    if (!Number.isInteger(delta) || delta === 0 || Math.abs(delta) > 100) {
+        return res.status(400).json({ erro: 'delta deve ser inteiro entre -100 e 100, diferente de zero' });
+    }
+    try {
+        await executar(
+            `INSERT INTO estoque (modelo, insumo, quantidade, estado) VALUES (?, ?, ?, ?)
+             ON CONFLICT(modelo, insumo, estado) DO UPDATE SET quantidade = MAX(0, estoque.quantidade + ?)`,
+            [modelo, insumo, Math.max(0, delta), estado, delta]);
+        const [linha] = await consultarTodos('SELECT quantidade FROM estoque WHERE modelo = ? AND insumo = ? AND estado = ?',
+            [modelo, insumo, estado]);
+        invalidarCacheDash();
+        res.json({ quantidade: linha.quantidade });
+    } catch (e) {
+        next(e);
+    }
+});
+
+// Zera todas as quantidades numa única operação; exige a palavra de confirmação
+app.post('/api/estoque/zerar', exigirPermissao('estoque'), async (req, res, next) => {
+    if (req.body.confirmacao !== 'ZERAR') return res.status(400).json({ erro: 'Confirmação inválida' });
+    try {
+        const r = await executar('UPDATE estoque SET quantidade = 0 WHERE quantidade <> 0');
+        invalidarCacheDash();
+        res.json({ zerados: r.changes });
+    } catch (e) {
+        next(e);
+    }
 });
 
 app.delete('/api/estoque/:id', exigirPermissao('estoque'), (req, res, next) => {
@@ -1000,14 +1006,6 @@ app.delete('/api/usuarios/:id', exigirPermissao('usuarios'), (req, res) => {
             res.status(204).end();
         });
     });
-});
-
-// ── Autenticação de estoque ───────────────────────────────────────────────────
-app.post('/api/auth/estoque', limiterAuth, (req, res) => {
-    const { senha } = req.body;
-    if (!senha) return res.status(400).json({ ok: false });
-    if (senha === ESTOQUE_SENHA) return res.json({ ok: true, token: gerarTokenEstoque() });
-    setTimeout(() => res.status(401).json({ ok: false }), 800);
 });
 
 // ── Impressão via IPP + PDF (Canon MF / AirPrint) ────────────────────────────
@@ -1375,7 +1373,7 @@ app.use((err, req, res, next) => {
     res.status(500).json({ erro: 'Erro interno do servidor' });
 });
 
-module.exports = { app, db, dbReady, estoqueTokens, parsePageLogLine, coletarImpressoes, interpretarSuprimentos, serieDivergente, verificarPresencaNaRede, interpretarConsumiveisHP, interpretarSuprimentosHPWeb,
+module.exports = { app, db, dbReady, parsePageLogLine, coletarImpressoes, interpretarSuprimentos, serieDivergente, verificarPresencaNaRede, interpretarConsumiveisHP, interpretarSuprimentosHPWeb,
     detectarLeituraParada, atualizarLeiturasParadas, limparHistoricoAntigo, horasDoExpediente, preverFimDosSuprimentos, modeloDeEstoque };
 
 // ── Inicialização e graceful shutdown (apenas quando executado diretamente) ────

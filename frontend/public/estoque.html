@@ -48,27 +48,15 @@
 
 <div class="toast" id="toast"></div>
 
-<div class="modal-overlay" id="modalSenha">
-  <div class="modal" style="max-width:320px">
-    <h4>🔒 Desbloquear Edição</h4>
-    <p>Digite a senha mestre para liberar os botões de ajuste por <strong style="color:var(--tx)">5 minutos</strong>.</p>
-    <span class="modal-label">Senha</span>
-    <input type="password" id="senhaInput" class="modal-input" placeholder="••••••••" autocomplete="off">
-    <p class="senha-erro" id="senhaErro">❌ Senha incorreta. Tente novamente.</p>
+<div class="modal-overlay" id="modalZerar">
+  <div class="modal" style="max-width:360px">
+    <h4>🗑️ Zerar todo o estoque</h4>
+    <p style="font-size:13px;color:var(--mt);margin-bottom:12px;line-height:1.6">Todas as quantidades de todos os grupos voltam para zero. Esta ação não pode ser desfeita.</p>
+    <span class="modal-label">Digite ZERAR para confirmar</span>
+    <input type="text" id="zerarInput" class="modal-input" autocomplete="off" placeholder="ZERAR">
     <div class="modal-actions">
-      <button class="btn-cancel" onclick="fecharModalSenha()">Cancelar</button>
-      <button class="btn-save" id="btnDesbloquear" onclick="validarSenha()">Desbloquear</button>
-    </div>
-  </div>
-</div>
-
-<div class="modal-overlay" id="modalConfirm">
-  <div class="modal" style="max-width:340px">
-    <h4 id="confirmTitle">Confirmar</h4>
-    <p id="confirmMsg" style="font-size:13px;color:var(--mt);margin-bottom:20px;line-height:1.6"></p>
-    <div class="modal-actions">
-      <button class="btn-cancel" onclick="document.getElementById('modalConfirm').classList.remove('open')">Cancelar</button>
-      <button class="btn-save" id="btnConfirmOk" style="background:var(--no)">Confirmar</button>
+      <button class="btn-cancel" onclick="document.getElementById('modalZerar').classList.remove('open')">Cancelar</button>
+      <button class="btn-save" id="btnZerarOk" style="background:var(--no)" onclick="confirmarZerar()" disabled>Zerar tudo</button>
     </div>
   </div>
 </div>
@@ -104,12 +92,14 @@
   </div>
   <main class="main-content">
   <div style="display:flex;justify-content:flex-end;margin-bottom:20px">
-    <button onclick="zerarTudo()" class="btn-sec">🗑️ Zerar Estoque</button>
+    <button onclick="abrirZerar()" class="btn-sec">🗑️ Zerar Estoque</button>
   </div>
   <div class="secao-titulo"><h3>🖋️ Impressoras de Tinta</h3><span class="badge-material badge-tinta">TINTA</span></div>
   <div id="estoqueContainerTinta"></div>
   <div class="secao-titulo"><h3>⬛ Impressoras de Toner</h3><span class="badge-material badge-toner">TONER</span></div>
   <div id="estoqueContainerToner"></div>
+  <div class="secao-titulo" id="tituloOutros" style="display:none"><h3>📦 Outros itens do estoque</h3><span class="badge-material badge-toner">SEM IMPRESSORA</span></div>
+  <div id="estoqueContainerOutros"></div>
   </main>
 </div>
 
@@ -117,9 +107,11 @@
   initUserLabel(); initClock(); setActiveNav();
 
   const CORES_MAP = { Colorido:['Preto','Ciano','Magenta','Amarelo'], Mono:['Preto'], Manutencao:['Manutenção'] };
+  const ORDEM_CORES = ['Preto','Ciano','Magenta','Amarelo','Manutenção'];
+  // Trava contra clique acidental: o grupo fica editável por 5 minutos
   const UNLOCK_DURATION = 5 * 60;
   const unlockedGroups = {};
-  let modeloPendente = null, estoqueToken = null, _confirmCb = null;
+  let _confirmCb = null;
 
   const esc = t => String(t ?? '').replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'})[m]);
 
@@ -129,22 +121,9 @@
     t.classList.add('show'); setTimeout(() => t.classList.remove('show'), 2500);
   }
 
-  function confirmar(titulo, msg, cb) {
-    document.getElementById('confirmTitle').textContent = titulo;
-    document.getElementById('confirmMsg').textContent   = msg;
-    _confirmCb = cb;
-    document.getElementById('modalConfirm').classList.add('open');
-    setTimeout(() => document.getElementById('btnConfirmOk').focus(), 150);
-  }
-
-  document.getElementById('btnConfirmOk').addEventListener('click', async () => {
-    document.getElementById('modalConfirm').classList.remove('open');
-    if (_confirmCb) { const cb = _confirmCb; _confirmCb = null; await cb(); }
-  });
-
-  ['modalSenha','modalConfirm'].forEach(id => {
+  ['modalZerar'].forEach(id => {
     document.getElementById(id).addEventListener('click', function(e) {
-      if (e.target === this) { this.classList.remove('open'); if (id==='modalSenha') modeloPendente=null; }
+      if (e.target === this) this.classList.remove('open');
     });
   });
 
@@ -155,178 +134,188 @@
     if (v.includes('amarelo')) return 'bg-yellow';
     return 'bg-black';
   }
-  function limparID(t) { return t.replace(/[^a-zA-Z0-9]/g,''); }
+
+  // Grupo pelo nome, sem montar seletor CSS com texto livre (aspas quebravam a tela)
+  function grupoDoModelo(modelo) {
+    return [...document.querySelectorAll('.model-group')].find(g => g.dataset.modelo === modelo);
+  }
 
   function toggleLock(modelo) {
-    if (unlockedGroups[modelo]) { lockGroup(modelo); return; }
-    if (hasPermission('estoque')) { unlockGroup(modelo); return; }
-    modeloPendente = modelo;
-    document.getElementById('senhaInput').value = '';
-    document.getElementById('senhaErro').classList.remove('show');
-    document.getElementById('modalSenha').classList.add('open');
-    setTimeout(() => document.getElementById('senhaInput').focus(), 150);
-  }
-
-  function fecharModalSenha() {
-    document.getElementById('modalSenha').classList.remove('open');
-    modeloPendente = null;
-  }
-
-  document.getElementById('senhaInput').addEventListener('keydown', e => { if (e.key==='Enter') validarSenha(); });
-
-  async function validarSenha() {
-    const senha = document.getElementById('senhaInput').value;
-    if (!senha) return;
-    const btn = document.getElementById('btnDesbloquear');
-    btn.textContent = 'Verificando...'; btn.disabled = true;
-    try {
-      const res  = await fetch('/api/auth/estoque', {
-        method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({senha})
-      });
-      const json = await res.json();
-      if (!res.ok || !json.ok) {
-        document.getElementById('senhaErro').classList.add('show');
-        document.getElementById('senhaInput').value = '';
-        document.getElementById('senhaInput').focus();
-      } else {
-        estoqueToken = json.token;
-        document.getElementById('modalSenha').classList.remove('open');
-        if (modeloPendente) { unlockGroup(modeloPendente); modeloPendente = null; }
-      }
-    } catch { document.getElementById('senhaErro').classList.add('show'); }
-    finally  { btn.textContent = 'Desbloquear'; btn.disabled = false; }
+    if (unlockedGroups[modelo]) lockGroup(modelo); else unlockGroup(modelo);
   }
 
   function unlockGroup(modelo) {
-    const key = limparID(modelo);
-    const group = document.querySelector(`.model-group[data-modelo="${modelo}"]`);
-    const btn   = document.getElementById(`lock-${key}`);
+    const group = grupoDoModelo(modelo);
     if (!group) return;
     group.classList.add('unlocked');
     group.querySelectorAll('.toner-card').forEach(c => c.classList.remove('locked'));
-    if (btn) { btn.classList.add('unlocked'); btn.innerHTML = `🔓 <span id="timer-${key}">5:00</span>`; }
+    const btn = group.querySelector('.btn-lock');
+    btn.classList.add('unlocked');
+    btn.innerHTML = '🔓 <span class="timer">5:00</span>';
     if (unlockedGroups[modelo]) clearInterval(unlockedGroups[modelo].interval);
     let remaining = UNLOCK_DURATION;
     const interval = setInterval(() => {
       remaining--;
-      const el = document.getElementById(`timer-${key}`);
+      const el = grupoDoModelo(modelo)?.querySelector('.timer');
       if (el) el.textContent = `${Math.floor(remaining/60)}:${String(remaining%60).padStart(2,'0')}`;
       if (remaining <= 0) lockGroup(modelo);
     }, 1000);
     unlockedGroups[modelo] = { interval };
-    showToast('Desbloqueado por 5 minutos ✓');
+    showToast('Edição liberada por 5 minutos ✓');
   }
 
   function lockGroup(modelo) {
-    const key = limparID(modelo);
-    const group = document.querySelector(`.model-group[data-modelo="${modelo}"]`);
-    const btn   = document.getElementById(`lock-${key}`);
+    if (unlockedGroups[modelo]) { clearInterval(unlockedGroups[modelo].interval); delete unlockedGroups[modelo]; }
+    const group = grupoDoModelo(modelo);
     if (!group) return;
     group.classList.remove('unlocked');
     group.querySelectorAll('.toner-card').forEach(c => c.classList.add('locked'));
-    if (btn) { btn.classList.remove('unlocked'); btn.innerHTML = '🔒 Bloqueado'; }
-    if (unlockedGroups[modelo]) { clearInterval(unlockedGroups[modelo].interval); delete unlockedGroups[modelo]; }
-    showToast('Estoque bloqueado');
+    const btn = group.querySelector('.btn-lock');
+    btn.classList.remove('unlocked');
+    btn.innerHTML = '🔒 Travado';
+    showToast('Edição travada');
   }
 
-  async function mudarQtd(mod, insumo, delta) {
-    if (!unlockedGroups[mod]) { showToast('Desbloqueie o estoque primeiro 🔒', true); return; }
-    const grupo = [...document.querySelectorAll('.model-group')].find(g => g.getAttribute('data-modelo')===mod);
-    if (!grupo) return;
-    const card = grupo.querySelector(`[data-insumo="${insumo}"]`);
+  // O ajuste é feito no banco (+1/−1): não sobrescreve o que outra pessoa lançou
+  async function mudarQtd(modelo, insumo, delta, botao) {
+    if (!unlockedGroups[modelo]) { showToast('Destrave o grupo primeiro 🔒', true); return; }
+    const card = botao.closest('.toner-card');
     const span = card.querySelector('.val');
-    const novo = Math.max(0, parseInt(span.textContent) + delta);
-    span.textContent = novo; span.style.color = 'var(--accent)';
-    card.classList.toggle('zerado', novo === 0);
+    card.querySelectorAll('.btn-q').forEach(b => b.disabled = true);
     try {
-      const res = await fetch('/api/estoque', {
-        method:'POST',
-        headers:authHeaders(),
-        body:JSON.stringify({modelo:mod, insumo, quantidade:novo, estado:'Novo'})
+      const res = await fetch('/api/estoque/ajuste', {
+        method: 'POST', headers: authHeaders(),
+        body: JSON.stringify({ modelo, insumo, delta, estado: 'Novo' })
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(json.erro);
+      span.textContent = json.quantidade;
+      card.classList.toggle('zerado', json.quantidade === 0);
+      card.title = json.quantidade === 0 ? 'Sem unidades em estoque' : '';
+      span.style.color = 'var(--accent)';
+      setTimeout(() => { span.style.color = ''; }, 400);
+    } catch (e) {
+      showToast('Erro ao salvar' + (e.message ? ': ' + e.message : '') + '!', true);
+      carregar();
+    } finally {
+      card.querySelectorAll('.btn-q').forEach(b => b.disabled = false);
+    }
+  }
+
+  // Cliques dos grupos (travar, + e −) por delegação — nada de nome em onclick
+  document.querySelector('.main-content').addEventListener('click', e => {
+    const botao = e.target.closest('button[data-acao]');
+    if (!botao) return;
+    const modelo = botao.closest('.model-group').dataset.modelo;
+    if (botao.dataset.acao === 'travar') toggleLock(modelo);
+    else mudarQtd(modelo, botao.closest('.toner-card').dataset.insumo, Number(botao.dataset.delta), botao);
+  });
+
+  function abrirZerar() {
+    document.getElementById('zerarInput').value = '';
+    document.getElementById('btnZerarOk').disabled = true;
+    document.getElementById('modalZerar').classList.add('open');
+    setTimeout(() => document.getElementById('zerarInput').focus(), 150);
+  }
+
+  document.getElementById('zerarInput').addEventListener('input', e => {
+    document.getElementById('btnZerarOk').disabled = e.target.value.trim().toUpperCase() !== 'ZERAR';
+  });
+
+  async function confirmarZerar() {
+    try {
+      const res = await fetch('/api/estoque/zerar', {
+        method: 'POST', headers: authHeaders(), body: JSON.stringify({ confirmacao: 'ZERAR' })
       });
       if (!res.ok) throw new Error();
-      setTimeout(() => { span.style.color = ''; }, 400);
-    } catch { showToast('Erro ao salvar!', true); carregar(); }
+      const json = await res.json();
+      document.getElementById('modalZerar').classList.remove('open');
+      showToast(`Estoque zerado (${json.zerados} itens)`);
+      carregar();
+    } catch { showToast('Erro ao zerar o estoque!', true); }
   }
 
-  function zerarTudo() {
-    confirmar('Zerar todo o estoque', 'Todos os quantitativos voltarão para zero. Esta ação não pode ser desfeita.', async () => {
-      const res = await fetch('/api/estoque', { headers: authHeaders() });
-      const est = await res.json();
-      for (const item of est) {
-        await fetch('/api/estoque', {
-          method:'POST',
-          headers:authHeaders(),
-          body:JSON.stringify({modelo:item.modelo, insumo:item.insumo, quantidade:0, estado:'Novo'})
-        });
-      }
-      showToast('Estoque zerado!'); carregar();
-    });
+  function montarGrupo({ modelo, titulo, subtitulo, material, cores, estoque }) {
+    const desbloq = !!unlockedGroups[modelo];
+    const isTinta = material === 'Tinta';
+    const group = document.createElement('div');
+    group.className = `model-group${desbloq ? ' unlocked' : ''}`;
+    group.dataset.modelo = modelo;
+    const cards = cores.map(cor => {
+      const quantidade = estoque.filter(e => e.modelo === modelo && e.insumo === cor).reduce((acc, e) => acc + (e.quantidade || 0), 0);
+      return `
+        <div class="toner-card${desbloq ? '' : ' locked'}${quantidade === 0 ? ' zerado' : ''}" data-insumo="${esc(cor)}" title="${quantidade === 0 ? 'Sem unidades em estoque' : ''}">
+          <div class="indicator ${corClasse(cor)}"></div>
+          <div class="toner-name">${esc(cor)}</div>
+          <div class="controls">
+            <button class="btn-q" data-acao="ajustar" data-delta="-1" aria-label="Diminuir ${esc(cor)}">−</button>
+            <span class="val">${quantidade}</span>
+            <button class="btn-q" data-acao="ajustar" data-delta="1" aria-label="Aumentar ${esc(cor)}">+</button>
+          </div>
+        </div>`;
+    }).join('');
+    group.innerHTML = `
+      <div class="model-header">
+        <span><strong>${esc(titulo)}</strong>${subtitulo ? `<span style="font-size:11px;color:var(--mt);font-weight:400"> · ${esc(subtitulo)}</span>` : ''}</span>
+        <div style="display:flex;align-items:center;gap:8px">
+          <span class="badge-material ${isTinta ? 'badge-tinta' : 'badge-toner'}">${esc(material.toUpperCase())}</span>
+          <button class="btn-lock${desbloq ? ' unlocked' : ''}" data-acao="travar" title="Libera os botões por 5 minutos (proteção contra clique acidental)">
+            ${desbloq ? '🔓 <span class="timer">--:--</span>' : '🔒 Travado'}
+          </button>
+        </div>
+      </div>
+      <div class="stock-grid">${cards}</div>`;
+    return group;
   }
 
   async function carregar() {
     try {
+      // /api/impressoras já traz o grupo de estoque de cada impressora (sem consultar SNMP)
       const [resImps, resEst] = await Promise.all([
-        fetch('/api/dashboard', { headers: authHeaders() }),
+        fetch('/api/impressoras', { headers: authHeaders() }),
         fetch('/api/estoque', { headers: authHeaders() })
       ]);
+      if (!resImps.ok || !resEst.ok) throw new Error('HTTP');
       const imps = await resImps.json(), estoque = await resEst.json();
-      const containerTinta = document.getElementById('estoqueContainerTinta');
-      const containerToner = document.getElementById('estoqueContainerToner');
-      containerTinta.innerHTML = ''; containerToner.innerHTML = '';
-      let temTinta = false, temToner = false;
+      const containers = {
+        Tinta: document.getElementById('estoqueContainerTinta'),
+        Toner: document.getElementById('estoqueContainerToner'),
+        Outros: document.getElementById('estoqueContainerOutros')
+      };
+      Object.values(containers).forEach(c => c.innerHTML = '');
+
       const agrupados = {};
-      // O servidor decide qual grupo do estoque abastece cada impressora; a tela
-      // lê e grava sempre nesse mesmo grupo (antes gravava no grupo e lia pelo
-      // modelo da impressora, e as Canon GX apareciam zeradas).
       imps.forEach(p => {
-        const chave = p.estoque_modelo_efetivo || (p.modelo||'Geral').trim().replace(/\s+/g,' ');
-        if (!agrupados[chave]) agrupados[chave] = {...p, modelo:chave, localizacoes:[]};
+        const chave = p.estoque_modelo_efetivo || (p.modelo || 'Geral').trim().replace(/\s+/g, ' ');
+        if (!agrupados[chave]) agrupados[chave] = { ...p, localizacoes: [] };
         if (p.localizacao) agrupados[chave].localizacoes.push(p.localizacao);
       });
       Object.entries(agrupados).forEach(([modelo, info]) => {
-        const cores   = CORES_MAP[info.tipo] || CORES_MAP['Colorido'];
-        const gridID  = `grid-${limparID(modelo)}`;
-        const lockID  = `lock-${limparID(modelo)}`;
-        const mat     = info.material || 'Toner';
-        const isTinta = mat === 'Tinta';
-        const desbloq = !!unlockedGroups[modelo];
-        temTinta = temTinta || isTinta; temToner = temToner || !isTinta;
-        const locs     = [...new Set(info.localizacoes)];
-        const locsHtml = locs.length ? `<span style="font-size:11px;color:var(--mt);font-weight:400"> · ${locs.join(' / ')}</span>` : '';
-        const group = document.createElement('div');
-        group.className = `model-group${desbloq?' unlocked':''}`;
-        group.setAttribute('data-modelo', modelo);
-        group.innerHTML = `
-          <div class="model-header">
-            <span><strong>${info.fabricante||'Geral'} — ${modelo}</strong>${locsHtml}</span>
-            <div style="display:flex;align-items:center;gap:8px">
-              <span class="badge-material ${isTinta?'badge-tinta':'badge-toner'}">${mat.toUpperCase()}</span>
-              <button class="btn-lock${desbloq?' unlocked':''}" id="${lockID}" onclick="toggleLock('${modelo}')">
-                ${desbloq?`🔓 <span id="timer-${limparID(modelo)}">--:--</span>`:'🔒 Bloqueado'}
-              </button>
-            </div>
-          </div>
-          <div class="stock-grid" id="${gridID}"></div>`;
-        (isTinta ? containerTinta : containerToner).appendChild(group);
-        cores.forEach(cor => {
-          const registros  = estoque.filter(e => e.modelo===modelo && e.insumo===cor);
-          const quantidade = registros.reduce((acc,e) => acc+(e.quantidade||0), 0);
-          document.getElementById(gridID).innerHTML += `
-            <div class="toner-card${desbloq?'':' locked'}${quantidade===0?' zerado':''}" data-insumo="${cor}" title="${quantidade===0?'Sem unidades em estoque':''}">
-              <div class="indicator ${corClasse(cor)}"></div>
-              <div class="toner-name">${cor}</div>
-              <div class="controls">
-                <button class="btn-q" onclick="mudarQtd('${modelo}','${cor}',-1)">−</button>
-                <span class="val">${quantidade}</span>
-                <button class="btn-q" onclick="mudarQtd('${modelo}','${cor}',1)">+</button>
-              </div>
-            </div>`;
-        });
+        const material = info.material || 'Toner';
+        containers[material === 'Tinta' ? 'Tinta' : 'Toner'].appendChild(montarGrupo({
+          modelo,
+          titulo: `${info.fabricante || 'Geral'} — ${modelo}`,
+          subtitulo: [...new Set(info.localizacoes)].join(' / '),
+          material,
+          cores: CORES_MAP[info.tipo] || CORES_MAP.Colorido,
+          estoque
+        }));
       });
-      if (!temTinta) containerTinta.innerHTML = '<p class="secao-empty">Nenhuma impressora de tinta cadastrada.</p>';
-      if (!temToner) containerToner.innerHTML = '<p class="secao-empty">Nenhuma impressora de toner cadastrada.</p>';
-    } catch(e) { console.error(e); showToast('Erro ao carregar dados', true); }
+
+      // Itens do estoque cujo grupo não abastece nenhuma impressora — antes ficavam invisíveis
+      const orfaos = [...new Set(estoque.map(e => e.modelo))].filter(m => !agrupados[m]);
+      orfaos.forEach(modelo => {
+        const cores = [...new Set(estoque.filter(e => e.modelo === modelo).map(e => e.insumo))]
+          .sort((a, b) => ORDEM_CORES.indexOf(a) - ORDEM_CORES.indexOf(b));
+        containers.Outros.appendChild(montarGrupo({
+          modelo, titulo: modelo, subtitulo: 'nenhuma impressora usa este grupo', material: 'Estoque', cores, estoque
+        }));
+      });
+      document.getElementById('tituloOutros').style.display = orfaos.length ? '' : 'none';
+
+      if (!containers.Tinta.children.length) containers.Tinta.innerHTML = '<p class="secao-empty">Nenhuma impressora de tinta cadastrada.</p>';
+      if (!containers.Toner.children.length) containers.Toner.innerHTML = '<p class="secao-empty">Nenhuma impressora de toner cadastrada.</p>';
+    } catch (e) { console.error(e); showToast('Erro ao carregar dados', true); }
   }
 
   carregar();

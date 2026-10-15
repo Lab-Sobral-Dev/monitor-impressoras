@@ -8,7 +8,7 @@ jest.mock('net-snmp', () => ({
 }));
 
 const request = require('supertest');
-const { app, db, dbReady, estoqueTokens } = require('../server');
+const { app, db, dbReady } = require('../server');
 const { assinarTokenAcoplamento, entrarViaSSO } = require('./sso');
 
 const IMP_VALIDA = { nome: 'Canon MF654', ip: '192.168.1.10', modelo: 'MF654Cdw', localizacao: 'Sala TI' };
@@ -23,13 +23,6 @@ function limparDB() {
             db.run('SELECT 1', resolve);
         });
     });
-}
-
-async function obterToken() {
-    const res = await request(app)
-        .post('/api/auth/estoque')
-        .send({ senha: 'senha-de-teste' });
-    return res.body.token;
 }
 
 async function obterTokenAdmin() {
@@ -61,34 +54,6 @@ async function criarImpressora(dados = IMP_VALIDA) {
 beforeAll(() => dbReady);
 beforeEach(() => limparDB());
 afterAll(() => new Promise(resolve => db.close(resolve)));
-
-// ── POST /api/auth/estoque ────────────────────────────────────────────────────
-describe('POST /api/auth/estoque', () => {
-    it('deve retornar 401 quando senha incorreta', async () => {
-        const res = await request(app)
-            .post('/api/auth/estoque')
-            .send({ senha: 'errada' });
-        expect(res.status).toBe(401);
-        expect(res.body.ok).toBe(false);
-    });
-
-    it('deve retornar 200 e token quando senha correta', async () => {
-        const res = await request(app)
-            .post('/api/auth/estoque')
-            .send({ senha: 'senha-de-teste' });
-        expect(res.status).toBe(200);
-        expect(res.body.ok).toBe(true);
-        expect(typeof res.body.token).toBe('string');
-        expect(res.body.token.length).toBeGreaterThan(0);
-    });
-
-    it('deve retornar 400 quando senha não enviada', async () => {
-        const res = await request(app)
-            .post('/api/auth/estoque')
-            .send({});
-        expect(res.status).toBe(400);
-    });
-});
 
 // ── Entrada pelo Gestão (SSO) ─────────────────────────────────────────────────
 describe('GET /api/auth/sso', () => {
@@ -417,20 +382,68 @@ describe('DELETE /api/impressoras/:id', () => {
 });
 
 // ── POST /api/estoque ─────────────────────────────────────────────────────────
+describe('Senha mestre do estoque', () => {
+    it('não existe mais (a permissão "estoque" do usuário é o que protege)', async () => {
+        const res = await request(app).post('/api/auth/estoque').send({ senha: 'qualquer' });
+        expect(res.status).toBe(404);
+    });
+});
+
+describe('POST /api/estoque/ajuste', () => {
+    const ajustar = async (delta, extra = {}) => request(app).post('/api/estoque/ajuste').set(await authAdmin())
+        .send({ modelo: 'Canon GX6010 / GX7010', insumo: 'Ciano', delta, ...extra });
+
+    it('soma sobre o valor do banco, não sobre o que a tela mostrava', async () => {
+        await runDB("INSERT INTO estoque (modelo, insumo, quantidade, estado) VALUES ('Canon GX6010 / GX7010', 'Ciano', 13, 'Novo')");
+        // Outra pessoa já tinha baixado para 12; esta tela ainda mostrava 13 e clicou em "+"
+        await runDB("UPDATE estoque SET quantidade = 12 WHERE modelo = 'Canon GX6010 / GX7010'");
+        const res = await ajustar(1);
+        expect(res.status).toBe(200);
+        expect(res.body.quantidade).toBe(13);
+    });
+
+    it('cria o item quando ainda não existe e nunca fica negativo', async () => {
+        expect((await ajustar(1)).body.quantidade).toBe(1);
+        expect((await ajustar(-1)).body.quantidade).toBe(0);
+        expect((await ajustar(-1)).body.quantidade).toBe(0);
+    });
+
+    it('recusa delta inválido e exige login', async () => {
+        expect((await ajustar(0)).status).toBe(400);
+        expect((await ajustar(1.5)).status).toBe(400);
+        expect((await ajustar(500)).status).toBe(400);
+        const semLogin = await request(app).post('/api/estoque/ajuste').send({ modelo: 'X', insumo: 'Preto', delta: 1 });
+        expect(semLogin.status).toBe(401);
+    });
+});
+
+describe('POST /api/estoque/zerar', () => {
+    it('exige a palavra de confirmação e zera tudo de uma vez', async () => {
+        await runDB("INSERT INTO estoque (modelo, insumo, quantidade, estado) VALUES ('A', 'Preto', 3, 'Novo'), ('B', 'Ciano', 7, 'Novo')");
+        const semConfirmar = await request(app).post('/api/estoque/zerar').set(await authAdmin()).send({});
+        expect(semConfirmar.status).toBe(400);
+
+        const res = await request(app).post('/api/estoque/zerar').set(await authAdmin()).send({ confirmacao: 'ZERAR' });
+        expect(res.status).toBe(200);
+        expect(res.body.zerados).toBe(2);
+        const lista = await request(app).get('/api/estoque').set(await authAdmin());
+        expect(lista.body.every(i => i.quantidade === 0)).toBe(true);
+    });
+});
+
+describe('GET /api/impressoras — grupo de estoque', () => {
+    it('informa o grupo de estoque que abastece cada impressora', async () => {
+        await request(app).post('/api/impressoras').set(await authAdmin())
+            .send({ nome: 'Canon', ip: '192.168.1.13', modelo: 'Canon GX7000 series 3.010', tipo: 'Colorido', material: 'Tinta' });
+        const lista = await request(app).get('/api/impressoras').set(await authAdmin());
+        expect(lista.body[0].estoque_modelo_efetivo).toBe('Canon GX6010 / GX7010');
+    });
+});
+
 describe('POST /api/estoque', () => {
     it('deve retornar 401 sem token', async () => {
         const res = await request(app)
             .post('/api/estoque')
-            .send({ modelo: 'X', insumo: 'Preto', quantidade: 5, estado: 'Novo' });
-        expect(res.status).toBe(401);
-    });
-
-    it('deve retornar 401 com token expirado', async () => {
-        const token = await obterToken();
-        estoqueTokens.set(token, Date.now() - 1);
-        const res = await request(app)
-            .post('/api/estoque')
-            .set('Authorization', `Bearer ${token}`)
             .send({ modelo: 'X', insumo: 'Preto', quantidade: 5, estado: 'Novo' });
         expect(res.status).toBe(401);
     });

@@ -65,13 +65,12 @@ PORT=3000
 DATABASE_PATH=./banco.db
 SNMP_CONCURRENCY=5
 
-ESTOQUE_SENHA=troque-este-token
 DOCKING_SECRET_MONITOR_IMPRESSORAS=segredo-compartilhado-com-o-gestao
 
 ALLOWED_ORIGIN=http://localhost:3000
 ```
 
-Importante: troque `ESTOQUE_SENHA` antes de usar o sistema em producao. Sem `DOCKING_SECRET_MONITOR_IMPRESSORAS` ninguem consegue entrar, pois a unica porta de entrada e o SSO do Gestao.
+Importante: sem `DOCKING_SECRET_MONITOR_IMPRESSORAS` ninguem consegue entrar, pois a unica porta de entrada e o SSO do Gestao.
 
 ## Execucao Local
 
@@ -176,7 +175,7 @@ npm test
 
 ## Observacoes de Producao
 
-- Use valores fortes em `ESTOQUE_SENHA` e `DOCKING_SECRET_MONITOR_IMPRESSORAS`.
+- Use um valor forte em `DOCKING_SECRET_MONITOR_IMPRESSORAS`.
 - Configure `ALLOWED_ORIGIN` com o dominio real do frontend.
 - Garanta backup periodico do arquivo SQLite definido em `DATABASE_PATH`.
 - Verifique se as impressoras permitem consulta SNMP pela rede do servidor.
