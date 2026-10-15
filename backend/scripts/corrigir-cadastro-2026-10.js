@@ -5,6 +5,8 @@
 //   2. .20  Contabilidade  : Kyocera M2040dn → Samsung SL-M4070FR (aparelho trocado no mesmo IP)
 //   3. .210 Qualidade      : cadastra a HP Color LaserJet Flow E57540 (impressora nova)
 //   4. .156 Microbiológico : HP 4103fdw passa a ser conexão USB (sem IP, sem monitoramento)
+//   5. Padroniza os nomes de localização (espaço sobrando, acentos, maiúsculas), para que
+//      o mesmo setor não apareça duas vezes nos filtros e agrupamentos
 //
 // Rodar DEPOIS de subir a versão com nº de série e conexão USB (o servidor cria
 // as colunas numero_serie e conexao ao iniciar).
@@ -37,6 +39,15 @@ const ATUALIZACOES = [
         ip: '192.86.221.156',
         campos: { conexao: 'usb', ip: null }
     }
+];
+
+// Nome atual exato → nome padronizado
+const LOCALIZACOES = [
+    { de: 'Contabilidade ',        para: 'Contabilidade' },
+    { de: 'Fisico-quimico',        para: 'Físico-químico' },
+    { de: 'LOGISTICA',             para: 'Logística' },
+    { de: 'Produção ',             para: 'Produção' },
+    { de: 'Sistema de qualidade ', para: 'Sistema de qualidade' },
 ];
 
 const INCLUSOES = [
@@ -84,6 +95,14 @@ async function main() {
             alteradas++;
             await run(`UPDATE impressoras SET ${mudancas.map(([k]) => `${k} = ?`).join(', ')} WHERE id = ?`,
                 [...mudancas.map(([, v]) => v), imp.id]);
+        }
+
+        for (const l of LOCALIZACOES) {
+            const afetadas = await all('SELECT id, ip FROM impressoras WHERE localizacao = ?', [l.de]);
+            if (!afetadas.length) { console.log(`· Localização "${l.de}": nenhuma impressora — já padronizada`); continue; }
+            console.log(`→ Localização "${l.de}" → "${l.para}" (${afetadas.map(a => `#${a.id} ${a.ip ?? 'USB'}`).join(', ')})`);
+            alteradas += afetadas.length;
+            await run('UPDATE impressoras SET localizacao = ? WHERE localizacao = ?', [l.para, l.de]);
         }
 
         for (const n of INCLUSOES) {

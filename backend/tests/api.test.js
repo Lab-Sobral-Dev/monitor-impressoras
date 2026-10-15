@@ -278,6 +278,16 @@ describe('POST /api/impressoras', () => {
         expect(res.status).toBe(400);
         expect(res.body.erro).toMatch(/numero_serie/);
     });
+
+    it('deve remover espaços sobrando da localização ao cadastrar e editar', async () => {
+        await request(app).post('/api/impressoras').set(await authAdmin()).send({ ...IMP_VALIDA, localizacao: ' Produção ' });
+        let imp = (await request(app).get('/api/impressoras').set(await authAdmin())).body.find(p => p.ip === IMP_VALIDA.ip);
+        expect(imp.localizacao).toBe('Produção');
+
+        await request(app).put(`/api/impressoras/${imp.id}`).set(await authAdmin()).send({ localizacao: 'Contabilidade  ' });
+        imp = (await request(app).get('/api/impressoras').set(await authAdmin())).body.find(p => p.id === imp.id);
+        expect(imp.localizacao).toBe('Contabilidade');
+    });
 });
 
 // ── PUT /api/impressoras/:id ──────────────────────────────────────────────────

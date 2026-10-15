@@ -859,7 +859,7 @@ app.post('/api/impressoras', exigirPermissao('impressoras'), (req, res, next) =>
     const conexao = req.body.conexao || 'rede';
     db.run(
         `INSERT INTO impressoras (nome, ip, modelo, localizacao, comunidade, tipo, material, numero_serie, conexao) VALUES (?,?,?,?,?,?,?,?,?)`,
-        [nome.trim(), conexao === 'usb' ? null : ip.trim(), modelo.trim(), localizacao, comunidade || 'public', tipo || 'Colorido', material || 'Toner', numero_serie?.trim() || null, conexao],
+        [nome.trim(), conexao === 'usb' ? null : ip.trim(), modelo.trim(), localizacao?.trim?.() ?? localizacao, comunidade || 'public', tipo || 'Colorido', material || 'Toner', numero_serie?.trim() || null, conexao],
         (err) => {
             if (err) { console.error(err); return next(err); }
             invalidarCacheDash();
@@ -885,7 +885,7 @@ app.put('/api/impressoras/:id', exigirPermissao('impressoras'), (req, res, next)
                 (nome        ?? existing.nome)?.trim?.()    ?? existing.nome,
                 (modelo      ?? existing.modelo)?.trim?.()  ?? existing.modelo,
                 ipFinal,
-                localizacao  ?? existing.localizacao,
+                (localizacao ?? existing.localizacao)?.trim?.() ?? existing.localizacao,
                 comunidade   ?? existing.comunidade,
                 tipo         ?? existing.tipo,
                 material     ?? existing.material,
