@@ -115,7 +115,7 @@ function validarEstoque(body) {
 // ── Cache do dashboard ────────────────────────────────────────────────────────
 let dashCache     = null;
 let dashCacheAt   = 0;
-let dashRefreshing = false;
+let dashRefreshing = null; // Promise da atualização em andamento
 const DASH_TTL    = 60_000;
 
 function invalidarCacheDash() {
@@ -123,28 +123,29 @@ function invalidarCacheDash() {
     dashCacheAt = 0;
 }
 
-async function refreshDashCache(rows) {
-    if (dashRefreshing) return;
-    dashRefreshing = true;
-    try {
-        const estoquePorModelo = await carregarEstoquePorModelo();
-        const resultados = await Promise.all(rows.map(async (imp) => {
-            const snmpData = ehUSB(imp) ? SEM_MONITORAMENTO : await obterDadosSNMP(imp.ip, imp.comunidade);
-            const grupoEstoque = modeloDeEstoque(imp);
-            return {
-                ...imp, material: imp.material || 'Toner', tipo: imp.tipo || 'Colorido', ...snmpData,
-                aparelho_divergente: serieDivergente(imp.numero_serie, snmpData.serie_detectada),
-                leitura_suspeita: leituraSuspeitaAtual(imp.id, snmpData),
-                previsao_dias: previsaoAtual(imp.id, snmpData),
-                estoque_modelo_efetivo: grupoEstoque,
-                estoque: estoquePorModelo[grupoEstoque] || {}
-            };
-        }));
-        dashCache   = resultados;
-        dashCacheAt = Date.now();
-    } finally {
-        dashRefreshing = false;
-    }
+// Quem chega durante uma atualização espera a mesma atualização terminar (antes
+// recebia a lista vazia e a tela mostrava "Nenhuma impressora cadastrada").
+function refreshDashCache(rows) {
+    if (!dashRefreshing) dashRefreshing = atualizarDashCache(rows).finally(() => { dashRefreshing = null; });
+    return dashRefreshing;
+}
+
+async function atualizarDashCache(rows) {
+    const estoquePorModelo = await carregarEstoquePorModelo();
+    const resultados = await Promise.all(rows.map(async (imp) => {
+        const snmpData = ehUSB(imp) ? SEM_MONITORAMENTO : await obterDadosSNMP(imp.ip, imp.comunidade);
+        const grupoEstoque = modeloDeEstoque(imp);
+        return {
+            ...imp, material: imp.material || 'Toner', tipo: imp.tipo || 'Colorido', ...snmpData,
+            aparelho_divergente: serieDivergente(imp.numero_serie, snmpData.serie_detectada),
+            leitura_suspeita: leituraSuspeitaAtual(imp.id, snmpData),
+            previsao_dias: previsaoAtual(imp.id, snmpData),
+            estoque_modelo_efetivo: grupoEstoque,
+            estoque: estoquePorModelo[grupoEstoque] || {}
+        };
+    }));
+    dashCache   = resultados;
+    dashCacheAt = Date.now();
 }
 
 // ── Sessões de admin ──────────────────────────────────────────────────────────
@@ -493,7 +494,10 @@ app.use((req, res, next) => {
     next();
 });
 
-app.use(express.static(publicDir));
+// "no-cache" = o navegador sempre confere (ETag) se a página/script mudou. Sem
+// isso, depois de uma atualização ele podia usar um admin-auth.js antigo com
+// uma página nova e a tela quebrava.
+app.use(express.static(publicDir, { setHeaders: res => res.setHeader('Cache-Control', 'no-cache') }));
 
 async function coletarHistorico() {
     db.all("SELECT id, ip, comunidade, numero_serie FROM impressoras WHERE conexao <> 'usb'", [], async (err, rows) => {
@@ -730,13 +734,13 @@ app.get('/api/dashboard', exigirAlgumaPermissao(['dashboard', 'estoque']), (req,
 
         if (cacheValido) {
             res.json(dashCache);
-            if (Date.now() - dashCacheAt > DASH_TTL / 2) refreshDashCache(rows);
+            if (Date.now() - dashCacheAt > DASH_TTL / 2) refreshDashCache(rows).catch(e => console.error('Erro ao atualizar painel:', e));
             return;
         }
 
         if (dashCache) {
             res.json(dashCache);
-            refreshDashCache(rows);
+            refreshDashCache(rows).catch(e => console.error('Erro ao atualizar painel:', e));
             return;
         }
 

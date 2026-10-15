@@ -73,6 +73,30 @@ describe('estoque no cadastro e no painel', () => {
     });
 });
 
+describe('GET /api/dashboard — pedidos simultâneos', () => {
+    it('quem chega durante a atualização recebe a lista completa, não vazia', async () => {
+        await run(`INSERT INTO impressoras (nome, modelo, material, conexao) VALUES
+            ('HP', 'HP LaserJet Pro MFP 4103fdw', 'Toner', 'usb'), ('Canon', 'Canon GX7000 series 3.010', 'Tinta', 'usb')`);
+        // Cadastro via API invalida o cache: os dois pedidos abaixo chegam com o painel vazio
+        await request(app).post('/api/impressoras').set(await auth())
+            .send({ nome: 'Brother', modelo: 'Brother DCP-T820DW', conexao: 'usb', material: 'Tinta' });
+        const cabecalho = await auth();
+        const [a, b] = await Promise.all([
+            request(app).get('/api/dashboard').set(cabecalho),
+            request(app).get('/api/dashboard').set(cabecalho)
+        ]);
+        expect(a.body).toHaveLength(3);
+        expect(b.body).toHaveLength(3);
+    });
+});
+
+describe('arquivos da tela', () => {
+    it('são servidos com Cache-Control: no-cache (navegador sempre confere se mudou)', async () => {
+        const res = await request(app).get('/admin-auth.js');
+        expect(res.headers['cache-control']).toBe('no-cache');
+    });
+});
+
 describe('GET /api/relatorios/estoque', () => {
     it('soma o consumo só das impressoras abastecidas pelo grupo (antes misturava todos os modelos)', async () => {
         await run(`INSERT INTO estoque (modelo, insumo, quantidade, estado) VALUES
