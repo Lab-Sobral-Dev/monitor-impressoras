@@ -23,8 +23,55 @@ function ehUSB(p) {
   return p?.conexao === 'usb';
 }
 
+// Situação para exibição:
+//   online      — SNMP respondeu
+//   sem_leitura — ligada na rede (responde em porta de impressão/web), mas sem SNMP
+//   offline     — nada responde no IP: desligada, desconectada ou mudou de IP
+//   usb         — conectada via USB, não monitorada
+function situacaoImpressora(p) {
+  if (ehUSB(p)) return 'usb';
+  if (p.online) return 'online';
+  return p.na_rede ? 'sem_leitura' : 'offline';
+}
+
 function estaOffline(p) {
-  return !p.online && !ehUSB(p);
+  return situacaoImpressora(p) === 'offline';
+}
+
+function semLeituraSNMP(p) {
+  return situacaoImpressora(p) === 'sem_leitura';
+}
+
+// Rótulos opcionais permitem cada tela manter o próprio vocabulário (ex.: CONECTADO)
+function seloSituacao(p, rotulos = {}) {
+  const selos = {
+    online:      ['on',   rotulos.online  || '● ONLINE'],
+    sem_leitura: ['warn', '● SEM LEITURA'],
+    offline:     ['off',  rotulos.offline || '● OFFLINE'],
+    usb:         ['usb',  'USB']
+  };
+  const [cls, texto] = selos[situacaoImpressora(p)];
+  return `<div class="sbadge ${cls}" title="${motivoSemDados(p)}">${texto}</div>`;
+}
+
+function rotuloSituacao(p) {
+  return { online: 'Online', sem_leitura: 'Sem leitura SNMP', offline: 'Offline', usb: 'USB' }[situacaoImpressora(p)];
+}
+
+// Explica por que não há níveis de tinta/toner para mostrar
+function motivoSemDados(p) {
+  switch (situacaoImpressora(p)) {
+    case 'usb':         return 'Conectada via USB — sem monitoramento';
+    case 'sem_leitura': return 'Ligada e na rede, mas sem resposta SNMP — verifique se o SNMP está ativado e a comunidade configurada, ou se o IP pertence a outro aparelho';
+    case 'offline':     return 'Não responde na rede — desligada, sem cabo/Wi-Fi ou mudou de IP';
+    default:            return 'A impressora não informa o nível de tinta/toner';
+  }
+}
+
+// Interface web só faz sentido quando há algo respondendo no IP
+function temInterfaceWeb(p) {
+  const s = situacaoImpressora(p);
+  return s === 'online' || s === 'sem_leitura';
 }
 
 function enderecoImpressora(p) {

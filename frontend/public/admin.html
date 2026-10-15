@@ -161,14 +161,15 @@
       document.getElementById('stat-offline').textContent = dash.filter(estaOffline).length;
       document.getElementById('stat-baixa').textContent   = dash.filter(p => p.online && tBaixa(p)).length;
 
-      const alertas   = dash.filter(p => estaOffline(p) || (p.online && tBaixa(p)) || p.aparelho_divergente);
+      const alertas   = dash.filter(p => estaOffline(p) || semLeituraSNMP(p) || (p.online && tBaixa(p)) || p.aparelho_divergente);
       const alertasEl = document.getElementById('alertas-body');
       if (!alertas.length) {
         alertasEl.innerHTML = '<div class="alert-ok">✓ Tudo funcionando normalmente</div>';
       } else {
         alertasEl.innerHTML = alertas.map(p => {
           const motivos = [];
-          if (!p.online) motivos.push('Sem sinal');
+          if (estaOffline(p))    motivos.push('Sem sinal: desligada ou fora da rede');
+          if (semLeituraSNMP(p)) motivos.push('Ligada, mas sem leitura SNMP (verifique SNMP/comunidade ou se o IP é de outro aparelho)');
           if (p.aparelho_divergente) {
             motivos.push(`Aparelho diferente do cadastrado: no IP está ${p.modelo_detectado || 'outro aparelho'} (série ${p.serie_detectada}); o cadastro tem a série ${p.numero_serie}. Atualize em Dispositivos.`);
           }
@@ -190,7 +191,7 @@
             </div>
             <div style="display:flex;align-items:center;gap:10px">
               <span style="font-size:11px;color:var(--mt)">${esc(motivos.join(' / '))}</span>
-              <span class="sbadge ${p.online?'on':'off'}">${p.online?'● ONLINE':'● OFFLINE'}</span>
+              ${seloSituacao(p)}
             </div>
           </div>`;
         }).join('');

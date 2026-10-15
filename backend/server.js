@@ -629,25 +629,54 @@ async function consultarImpressora(ip, comunidade, { timeout = 1000 } = {}) {
     }
 }
 
+// ── Presença na rede (quando o SNMP não responde) ─────────────────────────────
+// Diferencia "desligada / fora da rede" de "ligada, mas sem leitura SNMP"
+// (SNMP desativado, comunidade errada ou outro aparelho no IP). Conexão aceita
+// ou recusada (RST) nas portas usuais de impressora = há algo ligado no IP;
+// sem resposta em todas = nada responde.
+const PORTAS_PRESENCA = [9100, 631, 80, 443]; // RAW, IPP, web
+
+function testarPorta(ip, porta, timeout) {
+    return new Promise(resolve => {
+        const socket = net.connect({ host: ip, port: porta });
+        const fim = resultado => { socket.destroy(); resolve(resultado); };
+        socket.setTimeout(timeout, () => fim('sem_resposta'));
+        socket.once('connect', () => fim('aberta'));
+        socket.once('error', e => fim(e.code === 'ECONNREFUSED' ? 'recusada' : 'sem_resposta'));
+    });
+}
+
+async function verificarPresencaNaRede(ip, { portas = PORTAS_PRESENCA, timeout = 1000 } = {}) {
+    const resultados = await Promise.all(portas.map(p => testarPorta(ip, p, timeout)));
+    return {
+        na_rede: resultados.some(r => r !== 'sem_resposta'),
+        portas_abertas: portas.filter((_, i) => resultados[i] === 'aberta')
+    };
+}
+
 // Resposta usada para impressoras USB, que não são consultadas pela rede
-const SEM_MONITORAMENTO = Object.freeze({ online: false, suprimentos: [], serie_detectada: null, modelo_detectado: null });
+const SEM_MONITORAMENTO = Object.freeze({
+    online: false, na_rede: false, portas_abertas: [], suprimentos: [], serie_detectada: null, modelo_detectado: null
+});
 
 async function obterDadosSNMP(ip, comunidade) {
     try {
         const c = await consultarImpressora(ip, comunidade);
-        if (!c.online) return { online: false, suprimentos: [], serie_detectada: null, modelo_detectado: null };
+        if (!c.online) return { ...SEM_MONITORAMENTO, ...(await verificarPresencaNaRede(ip)) };
         let suprimentos = interpretarSuprimentos(c.itens, c.corantes);
         // Nenhum nível legível pela MIB padrão — tentar OID proprietário Brother
         if (suprimentos.length === 0) suprimentos = await obterNiveisBrother(ip, comunidade);
         return {
             online: true,
+            na_rede: true,
+            portas_abertas: [],
             suprimentos,
             serie_detectada: c.serie || null,
             modelo_detectado: c.modelo || c.sysDescr || null
         };
     } catch (e) {
         console.error(`Erro SNMP em ${ip}:`, e.message);
-        return { online: false, suprimentos: [], serie_detectada: null, modelo_detectado: null };
+        return { ...SEM_MONITORAMENTO };
     }
 }
 
@@ -1507,7 +1536,7 @@ app.use((err, req, res, next) => {
     res.status(500).json({ erro: 'Erro interno do servidor' });
 });
 
-module.exports = { app, db, dbReady, estoqueTokens, parsePageLogLine, coletarImpressoes, interpretarSuprimentos, serieDivergente };
+module.exports = { app, db, dbReady, estoqueTokens, parsePageLogLine, coletarImpressoes, interpretarSuprimentos, serieDivergente, verificarPresencaNaRede };
 
 // ── Inicialização e graceful shutdown (apenas quando executado diretamente) ────
 if (require.main === module) {

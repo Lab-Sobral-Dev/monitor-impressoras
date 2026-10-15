@@ -438,7 +438,7 @@
       html += '<div class="ficha-item"><div class="ficha-label">Localiza&ccedil;&atilde;o</div><div class="ficha-val" style="font-size:14px">' + escHTML(imp.localizacao||'&mdash;') + '</div></div>';
       html += '<div class="ficha-item"><div class="ficha-label">Tipo</div><div class="ficha-val" style="font-size:14px">' + escHTML(imp.tipo||'&mdash;') + '</div></div>';
       html += '<div class="ficha-item"><div class="ficha-label">Material</div><div class="ficha-val" style="font-size:14px">' + escHTML(imp.material||'&mdash;') + '</div></div>';
-      html += '<div class="ficha-item"><div class="ficha-label">Status</div><div class="ficha-val ' + (ehUSB(imp)?'':imp.online?'ok':'no') + '">' + (ehUSB(imp)?'USB — sem monitoramento':imp.online?'Online':'Offline') + '</div></div>';
+      html += '<div class="ficha-item"><div class="ficha-label">Status</div><div class="ficha-val ' + (imp.online?'ok':estaOffline(imp)?'no':semLeituraSNMP(imp)?'wn':'') + '" title="' + escHTML(motivoSemDados(imp)) + '">' + rotuloSituacao(imp) + '</div></div>';
       html += '<div class="ficha-item"><div class="ficha-label">P&aacute;ginas (total)</div><div class="ficha-val">' + (imp.paginas_total!=null ? Number(imp.paginas_total).toLocaleString('pt-BR') : '&mdash;') + '</div></div>';
       html += '</div>';
       if (sups.length) {
@@ -1048,7 +1048,7 @@
     const imp = lista.find(i => String(i.id) === String(id));
     if (!imp) return { titulo:'Ficha técnica', html:'<p>Impressora não encontrada.</p>' };
     let html = metricCards([
-      { label:'Status', value:ehUSB(imp) ? 'USB' : imp.online ? 'Online' : 'Offline', cls:ehUSB(imp) ? '' : imp.online ? 'ok' : 'no' },
+      { label:'Status', value:rotuloSituacao(imp), cls:imp.online ? 'ok' : estaOffline(imp) ? 'no' : 'wn' },
       { label:'Páginas', value:imp.paginas_total != null ? Number(imp.paginas_total).toLocaleString('pt-BR') : '-' },
       { label:'Material', value:escHTML(imp.material || '-') },
       { label:'Tipo', value:escHTML(imp.tipo || '-') }
@@ -1086,10 +1086,10 @@
     ]);
     html += barrasHorizontais(lista.map(imp => ({
       label: imp.nome || imp.modelo || 'Impressora',
-      meta: (imp.localizacao || enderecoImpressora(imp)) + ' | ' + (ehUSB(imp) ? 'USB' : imp.online ? 'Online' : 'Offline'),
+      meta: (imp.localizacao || enderecoImpressora(imp)) + ' | ' + rotuloSituacao(imp),
       value: Number(imp.paginas_total || 0),
       display: Number(imp.paginas_total || 0).toLocaleString('pt-BR'),
-      color: imp.online ? '#10b981' : ehUSB(imp) ? '#64748b' : '#ef4444'
+      color: imp.online ? '#10b981' : ehUSB(imp) ? '#64748b' : semLeituraSNMP(imp) ? '#f59e0b' : '#ef4444'
     })), { max: Math.max(1, ...lista.map(i => Number(i.paginas_total || 0))) });
     html += metricCards([{ label:'Páginas acumuladas', value:totalPaginas.toLocaleString('pt-BR') }]);
     return { titulo:'Resumo geral das impressoras', html };

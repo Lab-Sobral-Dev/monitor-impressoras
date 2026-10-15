@@ -266,9 +266,7 @@
               <div class="pmod">${esc(p.modelo || 'Canon')}</div>
               ${p.localizacao ? `<div class="ploc">📍 ${esc(p.localizacao)}</div>` : ''}
             </div>
-            ${ehUSB(p)
-              ? '<div class="sbadge usb" aria-label="Conectada via USB">USB</div>'
-              : `<div class="sbadge ${p.online ? 'on' : 'off'}" aria-label="${p.online ? 'Online' : 'Offline'}">${p.online ? '● ONLINE' : '● OFFLINE'}</div>`}
+            ${seloSituacao(p)}
           </div>
           <div class="inks">
             ${sup.length ? sup.map(s => {
@@ -283,11 +281,11 @@
                   </div>
                   <div class="bar"><div class="fill ${c} ${low ? 'low' : ''}" style="width:${s.percentual}%" role="progressbar" aria-valuenow="${s.percentual}" aria-valuemin="0" aria-valuemax="100"></div></div>
                 </div>`;
-            }).join('') : `<div class="nosnmp">${ehUSB(p) ? 'Conectada via USB — sem monitoramento' : p.online ? 'A impressora não informa o nível de tinta/toner' : 'Impressora offline — sem dados SNMP'}</div>`}
+            }).join('') : `<div class="nosnmp">${esc(motivoSemDados(p))}</div>`}
           </div>
           <div class="cfoot">
             <span class="lck">Verificado: ${agora}</span>
-            ${p.online ? `<a class="btr" href="http://${esc(p.ip)}" target="_blank" rel="noopener">Abrir Interface</a>` : ''}
+            ${temInterfaceWeb(p) ? `<a class="btr" href="http://${esc(p.ip)}" target="_blank" rel="noopener">Abrir Interface</a>` : ''}
           </div>
         </div>`;
     }).join('');
