@@ -52,23 +52,6 @@
   </div>
 </div>
 
-<div class="modal-overlay" id="modalSenha">
-  <div class="modal" style="max-width:420px">
-    <h4>Alterar senha</h4>
-    <p id="senhaUserLabel" style="font-size:13px;color:var(--mt);margin-bottom:14px"></p>
-    <label>Nova senha</label>
-    <input type="password" id="senhaNova" placeholder="Mínimo 6 caracteres" autocomplete="new-password">
-    <label style="display:flex;align-items:center;gap:8px;margin-top:12px;text-transform:none;letter-spacing:0;font-size:13px;color:var(--tx)">
-      <input type="checkbox" id="senhaForcarTroca" checked style="width:auto"> Exigir troca no próximo login
-    </label>
-    <div id="senhaMsg" style="font-size:12px;margin:10px 0;min-height:18px"></div>
-    <div class="modal-actions">
-      <button class="btn-cancel" onclick="fecharModalSenha()">Cancelar</button>
-      <button class="btn-save" onclick="salvarSenha()">Salvar senha</button>
-    </div>
-  </div>
-</div>
-
 <div class="modal-overlay" id="modalAcesso">
   <div class="modal" style="max-width:560px">
     <h4>Especificações de acesso</h4>
@@ -122,10 +105,12 @@
   <div class="form-card">
     <div class="fgrid">
       <div><label>Nome completo</label><input type="text" id="uNome" placeholder="João Silva" autocomplete="off"></div>
-      <div><label>Usuário (login)</label><input type="text" id="uUsuario" placeholder="joao.silva" autocomplete="off"></div>
+      <div><label>Usuário (login do Gestão)</label><input type="text" id="uUsuario" placeholder="joao.silva" autocomplete="off"></div>
     </div>
-    <label>Senha temporária <span style="font-weight:400;color:var(--mt);text-transform:none;letter-spacing:0">(o usuário deverá criar uma nova no primeiro acesso)</span></label>
-    <input type="password" id="uSenha" placeholder="Mínimo 6 caracteres" autocomplete="new-password">
+    <p style="font-size:12px;color:var(--mt);margin:-4px 0 12px;line-height:1.5">
+      O acesso é feito pelo Gestão — não há senha neste sistema. Use o mesmo login do Gestão para que a pessoa
+      já entre com o perfil e as permissões definidos aqui. Quem entra sem cadastro prévio é criado como Administrador.
+    </p>
     <label>Perfil</label>
     <select id="uPerfil" onchange="togglePermEditor('novo')" style="width:100%;background:var(--bg);border:1px solid var(--bd);color:var(--tx);border-radius:8px;padding:10px;margin-bottom:10px">
       <option value="admin">Administrador</option>
@@ -143,7 +128,6 @@
 
   let _confirmCb = null;
   let _usuariosCache = [];
-  let _senhaUserId = null;
   let _acessoUserId = null;
   const PERMISSOES = [
     ['dashboard','Dashboard'],
@@ -240,11 +224,6 @@
     btnAcesso.textContent = 'Acessos';
     btnAcesso.addEventListener('click', () => abrirAcessos(u.id));
 
-    const btnSenha = document.createElement('button');
-    btnSenha.className = 'btn-edit';
-    btnSenha.textContent = 'Senha';
-    btnSenha.addEventListener('click', () => abrirModalSenha(u.id));
-
     const btnToggle = document.createElement('button');
     btnToggle.className = 'btn-edit';
     btnToggle.textContent = u.ativo ? 'Desativar' : 'Ativar';
@@ -255,7 +234,6 @@
     btnDel.addEventListener('click', () => removerUsuario(u.id));
 
     tdAcoes.appendChild(btnAcesso);
-    tdAcoes.appendChild(btnSenha);
     tdAcoes.appendChild(btnToggle);
     tdAcoes.appendChild(btnDel);
 
@@ -268,66 +246,17 @@
     return _usuariosCache.find(u => String(u.id) === String(id));
   }
 
-  function abrirModalSenha(id) {
-    const u = buscarUsuario(id);
-    if (!u) return;
-    _senhaUserId = id;
-    document.getElementById('senhaUserLabel').textContent = u.nome + ' (' + u.usuario + ')';
-    document.getElementById('senhaNova').value = '';
-    document.getElementById('senhaForcarTroca').checked = true;
-    document.getElementById('senhaMsg').textContent = '';
-    document.getElementById('modalSenha').classList.add('open');
-    setTimeout(() => document.getElementById('senhaNova').focus(), 150);
-  }
-
-  function fecharModalSenha() {
-    _senhaUserId = null;
-    document.getElementById('modalSenha').classList.remove('open');
-  }
-
-  async function salvarSenha() {
-    const senha = document.getElementById('senhaNova').value;
-    const trocar_senha = document.getElementById('senhaForcarTroca').checked;
-    const msg = document.getElementById('senhaMsg');
-    msg.style.color = 'var(--no)';
-    msg.textContent = '';
-    if (!_senhaUserId) return;
-    if (!senha || senha.length < 6) {
-      msg.textContent = 'Senha deve ter ao menos 6 caracteres.';
-      return;
-    }
-    try {
-      const res = await fetch('/api/usuarios/' + _senhaUserId, {
-        method: 'PUT',
-        headers: authHeaders(),
-        body: JSON.stringify({ senha, trocar_senha })
-      });
-      const json = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        msg.textContent = json.erro || 'Erro ao alterar senha.';
-        return;
-      }
-      fecharModalSenha();
-      showToast('Senha alterada com sucesso.');
-      carregarUsuarios();
-    } catch {
-      msg.textContent = 'Erro de conexão.';
-    }
-  }
-
   function abrirAcessos(id) {
     const u = buscarUsuario(id);
     if (!u) return;
     _acessoUserId = id;
     const status = u.ativo ? '<span class="mini-badge ok">Ativo</span>' : '<span class="mini-badge no">Inativo</span>';
-    const troca = u.trocar_senha ? '<span class="mini-badge wn">Troca pendente</span>' : '<span class="mini-badge ok">Senha vigente</span>';
     const perms = Array.isArray(u.permissoes) ? u.permissoes : [];
     document.getElementById('acessoContent').innerHTML = `
       <div class="access-grid">
         <div class="access-item"><div class="access-label">Nome</div><div class="access-value">${escHTML(u.nome)}</div></div>
         <div class="access-item"><div class="access-label">Login</div><div class="access-value">${escHTML(u.usuario)}</div></div>
         <div class="access-item"><div class="access-label">Status</div><div class="access-value">${status}</div></div>
-        <div class="access-item"><div class="access-label">Senha</div><div class="access-value">${troca}</div></div>
         <div class="access-item"><div class="access-label">Perfil</div><div class="access-value">${u.perfil === 'admin' ? 'Administrador' : 'Operador'}</div></div>
         <div class="access-item"><div class="access-label">Criado em</div><div class="access-value">${fmtData(u.criado_em, true)}</div></div>
         <div class="access-item"><div class="access-label">Último login</div><div class="access-value">${fmtData(u.ultimo_login, true)}</div></div>
@@ -384,23 +313,20 @@
   async function criarUsuario() {
     const nome    = document.getElementById('uNome').value.trim();
     const usuario = document.getElementById('uUsuario').value.trim().toLowerCase();
-    const senha   = document.getElementById('uSenha').value;
     const perfil  = document.getElementById('uPerfil').value;
     const permissoes = perfil === 'admin' ? PERMISSOES.map(p => p[0]) : getPerms('permsNovo');
     const msg     = document.getElementById('uMsg');
     msg.style.color = 'var(--no)'; msg.textContent = '';
-    if (!nome || !usuario || !senha) { msg.textContent = 'Preencha todos os campos.'; return; }
-    if (senha.length < 6) { msg.textContent = 'Senha deve ter ao menos 6 caracteres.'; return; }
+    if (!nome || !usuario) { msg.textContent = 'Preencha nome e usuário.'; return; }
     try {
       const res  = await fetch('/api/usuarios', {
         method: 'POST', headers: authHeaders(),
-        body: JSON.stringify({ nome, usuario, senha, perfil, permissoes })
+        body: JSON.stringify({ nome, usuario, perfil, permissoes })
       });
       const json = await res.json();
       if (!res.ok) { msg.textContent = json.erro || 'Erro ao criar usuário.'; return; }
       document.getElementById('uNome').value = '';
       document.getElementById('uUsuario').value = '';
-      document.getElementById('uSenha').value = '';
       document.getElementById('uPerfil').value = 'admin';
       togglePermEditor('novo');
       msg.style.color = 'var(--ok)'; msg.textContent = '✓ Usuário criado com sucesso!';

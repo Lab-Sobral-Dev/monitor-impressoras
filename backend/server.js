@@ -990,22 +990,25 @@ app.get('/api/auth/verify', (req, res) => {
 
 // ── Gestão de usuários ────────────────────────────────────────────────────────
 app.get('/api/usuarios', exigirPermissao('usuarios'), (req, res) => {
-    db.all('SELECT id, nome, usuario, trocar_senha, perfil, permissoes, ativo, criado_em, ultimo_login FROM usuarios ORDER BY criado_em', [], (err, rows) => {
+    db.all('SELECT id, nome, usuario, perfil, permissoes, ativo, criado_em, ultimo_login FROM usuarios ORDER BY criado_em', [], (err, rows) => {
         if (err) return res.status(500).json({ erro: 'Erro ao listar usuários.' });
         res.json(rows.map(u => ({ ...u, permissoes: normalizarPermissoes(u.permissoes) })));
     });
 });
 
+// Cadastro prévio: o login deve ser o mesmo do Gestão. Ao entrar pelo SSO, a
+// pessoa já encontra o perfil e as permissões definidos aqui (sem cadastro
+// prévio, o SSO cria o usuário como admin).
 app.post('/api/usuarios', exigirPermissao('usuarios'), async (req, res) => {
-    const { nome, usuario, senha, perfil, permissoes } = req.body;
-    if (!nome || !usuario || !senha) return res.status(400).json({ erro: 'Nome, usuário e senha são obrigatórios.' });
-    if (senha.length < 6) return res.status(400).json({ erro: 'Senha deve ter ao menos 6 caracteres.' });
+    const { nome, usuario, perfil, permissoes } = req.body;
+    if (!nome || !usuario) return res.status(400).json({ erro: 'Nome e usuário são obrigatórios.' });
     const perfilFinal = perfil === 'operador' ? 'operador' : 'admin';
     const permsFinal = perfilFinal === 'admin' ? PERMISSOES_PADRAO : normalizarPermissoes(permissoes);
     try {
-        const hash = await hashSenha(senha);
+        // Senha aleatória e nunca comunicada — a conta só entra via SSO.
+        const hash = await hashSenha(crypto.randomBytes(32).toString('hex'));
         db.run(
-            `INSERT INTO usuarios (nome, usuario, senha_hash, trocar_senha, perfil, permissoes) VALUES (?, ?, ?, 1, ?, ?)`,
+            `INSERT INTO usuarios (nome, usuario, senha_hash, perfil, permissoes) VALUES (?, ?, ?, ?, ?)`,
             [nome.trim(), usuario.trim().toLowerCase(), hash, perfilFinal, JSON.stringify(permsFinal)],
             function(err) {
                 if (err) return res.status(409).json({ erro: 'Usuário já existe.' });
@@ -1016,7 +1019,7 @@ app.post('/api/usuarios', exigirPermissao('usuarios'), async (req, res) => {
 });
 
 app.put('/api/usuarios/:id', exigirPermissao('usuarios'), async (req, res) => {
-    const { nome, senha, ativo, trocar_senha, perfil, permissoes } = req.body;
+    const { nome, ativo, perfil, permissoes } = req.body;
     const fields = [];
     const vals   = [];
     if (nome  !== undefined) { fields.push('nome = ?');  vals.push(nome.trim()); }
@@ -1027,13 +1030,6 @@ app.put('/api/usuarios/:id', exigirPermissao('usuarios'), async (req, res) => {
         fields.push('permissoes = ?'); vals.push(JSON.stringify(perfilFinal === 'admin' ? PERMISSOES_PADRAO : normalizarPermissoes(permissoes)));
     } else if (permissoes !== undefined) {
         fields.push('permissoes = ?'); vals.push(JSON.stringify(normalizarPermissoes(permissoes)));
-    }
-    if (senha) {
-        if (senha.length < 6) return res.status(400).json({ erro: 'Senha deve ter ao menos 6 caracteres.' });
-        try { fields.push('senha_hash = ?'); vals.push(await hashSenha(senha)); } catch { return res.status(500).json({ erro: 'Erro interno.' }); }
-        fields.push('trocar_senha = ?'); vals.push(trocar_senha === false ? 0 : 1);
-    } else if (trocar_senha !== undefined) {
-        fields.push('trocar_senha = ?'); vals.push(trocar_senha ? 1 : 0);
     }
     if (!fields.length) return res.status(400).json({ erro: 'Nenhum campo para atualizar.' });
     vals.push(req.params.id);

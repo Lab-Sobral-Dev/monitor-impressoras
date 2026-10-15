@@ -131,20 +131,35 @@ describe('Login por usuário e senha', () => {
 });
 
 describe('Gestao de usuarios', () => {
-    it('deve listar especificacoes de acesso sem expor hash de senha', async () => {
+    it('deve cadastrar usuário sem senha e listar sem expor dados de senha', async () => {
         const usuario = `teste.acesso.${Date.now()}`;
-        await request(app)
+        const criado = await request(app)
             .post('/api/usuarios')
             .set(await authAdmin())
-            .send({ nome: 'Teste Acesso', usuario, senha: 'senha123' });
+            .send({ nome: 'Teste Acesso', usuario });
+        expect(criado.status).toBe(201);
 
         const res = await request(app).get('/api/usuarios').set(await authAdmin());
         expect(res.status).toBe(200);
         const user = res.body.find(u => u.usuario === usuario);
         expect(user).toBeTruthy();
-        expect(user).toHaveProperty('trocar_senha');
         expect(user).toHaveProperty('ultimo_login');
         expect(user).not.toHaveProperty('senha_hash');
+        expect(user).not.toHaveProperty('trocar_senha');
+    });
+
+    it('deve exigir nome e usuário no cadastro', async () => {
+        const res = await request(app).post('/api/usuarios').set(await authAdmin()).send({ nome: 'Sem Login' });
+        expect(res.status).toBe(400);
+    });
+
+    it('não deve mais aceitar troca de senha pela edição', async () => {
+        const usuario = `teste.semsenha.${Date.now()}`;
+        await request(app).post('/api/usuarios').set(await authAdmin()).send({ nome: 'Sem Senha', usuario });
+        const { id } = (await request(app).get('/api/usuarios').set(await authAdmin())).body.find(u => u.usuario === usuario);
+        const res = await request(app).put(`/api/usuarios/${id}`).set(await authAdmin()).send({ senha: 'nova123' });
+        expect(res.status).toBe(400);
+        expect(res.body.erro).toMatch(/Nenhum campo/);
     });
 
     it('deve aplicar permissoes por usuario nas rotas protegidas', async () => {
@@ -155,7 +170,6 @@ describe('Gestao de usuarios', () => {
             .send({
                 nome: 'Teste Permissao',
                 usuario,
-                senha: 'senha123',
                 perfil: 'operador',
                 permissoes: ['relatorios']
             });

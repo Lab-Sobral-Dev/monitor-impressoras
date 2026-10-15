@@ -51,7 +51,7 @@ describe('GET /api/relatorios/auditoria', () => {
         await request(app)
             .post('/api/usuarios')
             .set(await authAdmin())
-            .send({ nome: 'Sem Permissao', usuario, senha: 'senha123', perfil: 'operador', permissoes: ['dashboard'] });
+            .send({ nome: 'Sem Permissao', usuario, perfil: 'operador', permissoes: ['dashboard'] });
         const sessao = await entrarViaSSO(app, usuario);
 
         const res = await request(app)
