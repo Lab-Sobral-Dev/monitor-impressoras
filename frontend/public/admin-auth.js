@@ -64,7 +64,7 @@ function motivoSemDados(p) {
     case 'usb':         return 'Conectada via USB — sem monitoramento';
     case 'sem_leitura': return 'Ligada e na rede, mas sem resposta SNMP — verifique se o SNMP está ativado e a comunidade configurada, ou se o IP pertence a outro aparelho';
     case 'offline':     return 'Não responde na rede — desligada, sem cabo/Wi-Fi ou mudou de IP';
-    default:            return 'A impressora não informa o nível de tinta/toner';
+    default:            return p.aviso_suprimento || 'A impressora não informa o nível de tinta/toner';
   }
 }
 

@@ -654,9 +654,52 @@ async function verificarPresencaNaRede(ip, { portas = PORTAS_PRESENCA, timeout =
     };
 }
 
+// ── Níveis pela página interna da HP (LEDM) ───────────────────────────────────
+// Algumas HP (ex.: LaserJet Pro 4103) respondem "nível desconhecido" no SNMP,
+// mas informam o percentual em /DevMgmt/ConsumableConfigDyn.xml. Esse XML
+// também revela cartucho recarregado — caso em que a HP não informa o nível.
+const CORES_LEDM = { K: 'Preto', C: 'Ciano', M: 'Magenta', Y: 'Amarelo' };
+const AVISO_RECARREGADO = 'Cartucho recarregado — a HP não informa o nível de cartuchos recarregados';
+
+function interpretarConsumiveisHP(xml) {
+    const porCor = new Map();
+    let recarregado = false;
+    const blocos = String(xml).match(/<ccdyn:ConsumableInfo>[\s\S]*?<\/ccdyn:ConsumableInfo>/g) || [];
+    for (const bruto of blocos) {
+        // Dados do cartucho anterior não descrevem o atual
+        const bloco = bruto.replace(/<ccdyn:PreviousCartridgeData>[\s\S]*?<\/ccdyn:PreviousCartridgeData>/g, '');
+        const campo = nome => new RegExp(`<dd:${nome}>([^<]*)</dd:${nome}>`).exec(bloco)?.[1]?.trim();
+        if (!['toner', 'ink'].includes(campo('ConsumableTypeEnum'))) continue;
+        if (campo('IsRefilled') === 'true') recarregado = true;
+        const perc = Number.parseInt(campo('ConsumablePercentageLevelRemaining'), 10);
+        if (Number.isNaN(perc)) continue;
+        for (const letra of campo('ConsumableLabelCode') || '') {
+            const nome = CORES_LEDM[letra];
+            if (nome && !porCor.has(nome)) porCor.set(nome, { nome, percentual: Math.max(0, Math.min(100, perc)) });
+        }
+    }
+    return { suprimentos: ORDEM_CORES.filter(c => porCor.has(c)).map(c => porCor.get(c)), recarregado };
+}
+
+function obterConsumiveisHP(ip) {
+    return new Promise(resolve => {
+        const vazio = { suprimentos: [], recarregado: false };
+        const req = http.get({ host: ip, port: 80, path: '/DevMgmt/ConsumableConfigDyn.xml', timeout: 2000 }, res => {
+            if (res.statusCode !== 200) { res.resume(); return resolve(vazio); }
+            let xml = '';
+            res.setEncoding('utf8');
+            res.on('data', parte => { if (xml.length < 512 * 1024) xml += parte; });
+            res.on('end', () => resolve(interpretarConsumiveisHP(xml)));
+        });
+        req.on('timeout', () => req.destroy());
+        req.on('error', () => resolve(vazio));
+    });
+}
+
 // Resposta usada para impressoras USB, que não são consultadas pela rede
 const SEM_MONITORAMENTO = Object.freeze({
-    online: false, na_rede: false, portas_abertas: [], suprimentos: [], serie_detectada: null, modelo_detectado: null
+    online: false, na_rede: false, portas_abertas: [], suprimentos: [], aviso_suprimento: null,
+    serie_detectada: null, modelo_detectado: null
 });
 
 async function obterDadosSNMP(ip, comunidade) {
@@ -664,13 +707,21 @@ async function obterDadosSNMP(ip, comunidade) {
         const c = await consultarImpressora(ip, comunidade);
         if (!c.online) return { ...SEM_MONITORAMENTO, ...(await verificarPresencaNaRede(ip)) };
         let suprimentos = interpretarSuprimentos(c.itens, c.corantes);
+        let aviso_suprimento = null;
         // Nenhum nível legível pela MIB padrão — tentar OID proprietário Brother
         if (suprimentos.length === 0) suprimentos = await obterNiveisBrother(ip, comunidade);
+        // ...e a página interna da HP
+        if (suprimentos.length === 0 && /\bHP\b|hewlett/i.test(`${c.sysDescr} ${c.modelo}`)) {
+            const hp = await obterConsumiveisHP(ip);
+            suprimentos = hp.suprimentos;
+            if (!suprimentos.length && hp.recarregado) aviso_suprimento = AVISO_RECARREGADO;
+        }
         return {
             online: true,
             na_rede: true,
             portas_abertas: [],
             suprimentos,
+            aviso_suprimento,
             serie_detectada: c.serie || null,
             modelo_detectado: c.modelo || c.sysDescr || null
         };
@@ -1536,7 +1587,7 @@ app.use((err, req, res, next) => {
     res.status(500).json({ erro: 'Erro interno do servidor' });
 });
 
-module.exports = { app, db, dbReady, estoqueTokens, parsePageLogLine, coletarImpressoes, interpretarSuprimentos, serieDivergente, verificarPresencaNaRede };
+module.exports = { app, db, dbReady, estoqueTokens, parsePageLogLine, coletarImpressoes, interpretarSuprimentos, serieDivergente, verificarPresencaNaRede, interpretarConsumiveisHP };
 
 // ── Inicialização e graceful shutdown (apenas quando executado diretamente) ────
 if (require.main === module) {
