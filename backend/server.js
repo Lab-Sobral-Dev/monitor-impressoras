@@ -1,15 +1,23 @@
 const express      = require('express');
 const sqlite3      = require('sqlite3').verbose();
-const snmp         = require('net-snmp');
 const net          = require('net');
 const http         = require('http');
-const https        = require('https');
 const helmet       = require('helmet');
 const cors         = require('cors');
 const rateLimit    = require('express-rate-limit');
 const crypto       = require('crypto');
 const fs           = require('fs');
 const path         = require('path');
+
+const {
+    obterDadosSNMP, obterContadorPaginas, descobrirImpressora, verificarPresencaNaRede,
+    interpretarSuprimentos, interpretarConsumiveisHP, interpretarSuprimentosHPWeb,
+    normalizarSerie, serieDivergente, SEM_MONITORAMENTO
+} = require('./lib/leitura-impressora');
+const { gerarPDF } = require('./lib/pdf');
+const {
+    DIA_MS, detectarLeituraParada, preverFimDosSuprimentos, consumoDiarioPorImpressora, horasDoExpediente
+} = require('./lib/analise-historico');
 
 const app = express();
 
@@ -515,363 +523,6 @@ app.use((req, res, next) => {
 
 app.use(express.static(publicDir));
 
-// ── SNMP ──────────────────────────────────────────────────────────────────────
-
-// Fallback Brother: OID proprietário com formato TLV binário
-// Chaves 0x81-0x84 = níveis percentuais dos suprimentos 1-4
-function obterNiveisBrother(ip, comunidade) {
-    return new Promise((resolve) => {
-        const BROTHER_OID  = '1.3.6.1.4.1.2435.2.3.9.4.2.1.5.5.8.0';
-        const DESC_OIDS = [
-            '1.3.6.1.2.1.43.11.1.1.6.1.1',
-            '1.3.6.1.2.1.43.11.1.1.6.1.2',
-            '1.3.6.1.2.1.43.11.1.1.6.1.3',
-            '1.3.6.1.2.1.43.11.1.1.6.1.4',
-        ];
-        const NOME_MAP = { black: 'Preto', yellow: 'Amarelo', cyan: 'Ciano', magenta: 'Magenta' };
-        const session = snmp.createSession(ip, comunidade || 'public', { timeout: 2000, retries: 0 });
-        session.get([BROTHER_OID, ...DESC_OIDS], (err, vbs) => {
-            session.close();
-            if (err || !vbs[0] || snmp.isVarbindError(vbs[0])) { resolve([]); return; }
-            const buf = vbs[0].value;
-            if (!Buffer.isBuffer(buf)) { resolve([]); return; }
-            // Parsear TLV: key(1) + type(1) + len(1) + value(len bytes)
-            const percMap = {};
-            let pos = 0;
-            while (pos + 2 < buf.length) {
-                const key = buf[pos];
-                if (key === 0xFF) break;
-                const len = buf[pos + 2];
-                if (pos + 3 + len > buf.length) break;
-                if ((key & 0x80) && len === 4) {
-                    const val = buf.readInt32BE(pos + 3);
-                    if (val >= 0 && val <= 100) percMap[key & 0x7F] = val;
-                }
-                pos += 3 + len;
-            }
-            const suprimentos = [];
-            for (let i = 1; i <= 4; i++) {
-                if (!(i in percMap)) continue;
-                const descVb  = vbs[i];
-                if (!descVb || snmp.isVarbindError(descVb)) continue;
-                const descRaw = (Buffer.isBuffer(descVb.value) ? descVb.value.toString() : String(descVb.value)).toLowerCase();
-                const nome = Object.entries(NOME_MAP).find(([k]) => descRaw.includes(k))?.[1];
-                if (nome) suprimentos.push({ nome, percentual: percMap[i] });
-            }
-            resolve(suprimentos);
-        });
-    });
-}
-
-// ── Consulta SNMP de impressora (Printer-MIB, RFC 3805) ───────────────────────
-// Lê identificação (descrição, modelo, nº de série) e a tabela prtMarkerSupplies
-// item a item (tipo, cor, máximo, nível), usando o tipo/cor que a própria
-// impressora informa em vez de supor pela posição. Uma requisição por item: no
-// SNMP v1 um único OID inexistente faz a requisição inteira falhar
-// (noSuchName) — pedir as 4 cores de uma vez fazia impressoras monocromáticas
-// aparecerem sempre offline.
-const OID_SYS_DESCR        = '1.3.6.1.2.1.1.1.0';
-const OID_MODELO           = '1.3.6.1.2.1.25.3.2.1.3.1';    // hrDeviceDescr
-const OID_NUMERO_SERIE     = '1.3.6.1.2.1.43.5.1.1.17.1';   // prtGeneralSerialNumber
-const OID_SUPRIMENTOS      = '1.3.6.1.2.1.43.11.1.1';       // prtMarkerSuppliesEntry
-const OID_CORANTES         = '1.3.6.1.2.1.43.12.1.1.4.1';   // prtMarkerColorantValue
-const TIPOS_TINTA          = new Set([5, 6]);               // ink, inkCartridge
-const TIPOS_TONER          = new Set([3, 21]);              // toner, tonerCartridge
-const NOMES_COR            = [['black', 'Preto'], ['cyan', 'Ciano'], ['magenta', 'Magenta'], ['yellow', 'Amarelo']];
-const ORDEM_CORES          = NOMES_COR.map(([, nome]) => nome);
-const MAX_ITENS_SUPRIMENTO = 12;
-
-function textoSNMP(valor) {
-    return Buffer.isBuffer(valor) ? valor.toString().replace(/\0/g, '').trim() : String(valor ?? '').trim();
-}
-
-function ehTintaOuToner(item) {
-    return TIPOS_TINTA.has(item.tipo) || TIPOS_TONER.has(item.tipo);
-}
-
-function corDoItem(item, corantes) {
-    for (const t of [corantes[item.corante] || '', item.descricao || '']) {
-        const achado = NOMES_COR.find(([en]) => String(t).toLowerCase().includes(en));
-        if (achado) return achado[1];
-    }
-    return null;
-}
-
-// nivel -2 = desconhecido, -3 = "há algum restante" (RFC 3805) — sem percentual
-function calcularPercentual(max, nivel) {
-    if (typeof nivel !== 'number' || nivel < 0) return null;
-    let perc;
-    if (max > 0) perc = Math.round((nivel / max) * 100);
-    else if (max === -2) perc = nivel > 100 ? Math.round((nivel / 255) * 100) : nivel;
-    else return null;
-    return Math.max(0, Math.min(100, perc));
-}
-
-// itens: [{ tipo, corante, descricao, max, nivel }]; corantes: { indice: 'black', ... }
-function interpretarSuprimentos(itens, corantes = {}) {
-    const porCor = new Map();
-    for (const item of itens) {
-        if (!ehTintaOuToner(item)) continue;
-        const nome = corDoItem(item, corantes);
-        if (!nome || porCor.has(nome)) continue;
-        const percentual = calcularPercentual(item.max, item.nivel);
-        if (percentual !== null) porCor.set(nome, { nome, percentual });
-    }
-    return ORDEM_CORES.filter(c => porCor.has(c)).map(c => porCor.get(c));
-}
-
-// Cores de tinta/toner que a impressora tem, mesmo sem nível legível
-function coresDosSuprimentos(itens, corantes = {}) {
-    return [...new Set(itens.filter(ehTintaOuToner).map(it => corDoItem(it, corantes)).filter(Boolean))];
-}
-
-function normalizarSerie(serie) {
-    return String(serie ?? '').trim().toUpperCase();
-}
-
-// Aparelho no IP não é o cadastrado: os dois números de série existem e diferem
-function serieDivergente(serieCadastrada, serieDetectada) {
-    const cadastrada = normalizarSerie(serieCadastrada);
-    const detectada  = normalizarSerie(serieDetectada);
-    return Boolean(cadastrada && detectada && cadastrada !== detectada);
-}
-
-function snmpGet(session, oids) {
-    return new Promise(resolve => session.get(oids, (erro, varbinds) => resolve({ erro, varbinds })));
-}
-
-async function lerTextoSNMP(session, oid) {
-    const { erro, varbinds } = await snmpGet(session, [oid]);
-    if (erro || !varbinds?.[0] || snmp.isVarbindError(varbinds[0])) return '';
-    return textoSNMP(varbinds[0].value);
-}
-
-async function consultarImpressora(ip, comunidade, { timeout = 1000 } = {}) {
-    const offline = { online: false, sysDescr: '', modelo: '', serie: '', itens: [], corantes: {} };
-    const session = snmp.createSession(ip, comunidade || 'public', { timeout, retries: 1 });
-    try {
-        // Qualquer resposta — inclusive noSuchName — significa que o aparelho está na rede.
-        const inicial = await snmpGet(session, [OID_SYS_DESCR]);
-        if (inicial.erro && inicial.erro.name !== 'RequestFailedError') return offline;
-        const sysDescr = !inicial.erro && !snmp.isVarbindError(inicial.varbinds[0]) ? textoSNMP(inicial.varbinds[0].value) : '';
-        const modelo   = await lerTextoSNMP(session, OID_MODELO);
-        const serie    = await lerTextoSNMP(session, OID_NUMERO_SERIE);
-
-        const itens = [];
-        for (let i = 1; i <= MAX_ITENS_SUPRIMENTO; i++) {
-            const col = c => `${OID_SUPRIMENTOS}.${c}.1.${i}`;
-            const { erro, varbinds } = await snmpGet(session, [col(5), col(3), col(6), col(8), col(9)]);
-            // noSuchName = a tabela acabou (ou não existe)
-            if (erro || varbinds.some(vb => snmp.isVarbindError(vb))) break;
-            const [tipo, corante, descricao, max, nivel] = varbinds.map(vb => vb.value);
-            itens.push({ tipo, corante, descricao: textoSNMP(descricao), max, nivel });
-        }
-
-        const corantes = {};
-        const indices = [...new Set(itens.map(it => it.corante).filter(c => c > 0))];
-        if (indices.length) {
-            const { erro, varbinds } = await snmpGet(session, indices.map(c => `${OID_CORANTES}.${c}`));
-            if (!erro) varbinds.forEach((vb, k) => {
-                if (!snmp.isVarbindError(vb)) corantes[indices[k]] = textoSNMP(vb.value);
-            });
-        }
-        return { online: true, sysDescr, modelo, serie, itens, corantes };
-    } finally {
-        session.close();
-    }
-}
-
-// ── Presença na rede (quando o SNMP não responde) ─────────────────────────────
-// Diferencia "desligada / fora da rede" de "ligada, mas sem leitura SNMP"
-// (SNMP desativado, comunidade errada ou outro aparelho no IP). Conexão aceita
-// ou recusada (RST) nas portas usuais de impressora = há algo ligado no IP;
-// sem resposta em todas = nada responde.
-const PORTAS_PRESENCA = [9100, 631, 80, 443]; // RAW, IPP, web
-
-function testarPorta(ip, porta, timeout) {
-    return new Promise(resolve => {
-        const socket = net.connect({ host: ip, port: porta });
-        const fim = resultado => { socket.destroy(); resolve(resultado); };
-        socket.setTimeout(timeout, () => fim('sem_resposta'));
-        socket.once('connect', () => fim('aberta'));
-        socket.once('error', e => fim(e.code === 'ECONNREFUSED' ? 'recusada' : 'sem_resposta'));
-    });
-}
-
-async function verificarPresencaNaRede(ip, { portas = PORTAS_PRESENCA, timeout = 1000 } = {}) {
-    const resultados = await Promise.all(portas.map(p => testarPorta(ip, p, timeout)));
-    return {
-        na_rede: resultados.some(r => r !== 'sem_resposta'),
-        portas_abertas: portas.filter((_, i) => resultados[i] === 'aberta')
-    };
-}
-
-// ── Níveis pela página interna da HP (LEDM) ───────────────────────────────────
-// Algumas HP (ex.: LaserJet Pro 4103) respondem "nível desconhecido" no SNMP,
-// mas informam o percentual em /DevMgmt/ConsumableConfigDyn.xml. Esse XML
-// também revela cartucho recarregado — caso em que a HP não informa o nível.
-const CORES_LEDM = { K: 'Preto', C: 'Ciano', M: 'Magenta', Y: 'Amarelo' };
-const AVISO_RECARREGADO = 'Cartucho recarregado — a HP não informa o nível de cartuchos recarregados';
-
-function interpretarConsumiveisHP(xml) {
-    const porCor = new Map();
-    let recarregado = false;
-    const blocos = String(xml).match(/<ccdyn:ConsumableInfo>[\s\S]*?<\/ccdyn:ConsumableInfo>/g) || [];
-    for (const bruto of blocos) {
-        // Dados do cartucho anterior não descrevem o atual
-        const bloco = bruto.replace(/<ccdyn:PreviousCartridgeData>[\s\S]*?<\/ccdyn:PreviousCartridgeData>/g, '');
-        const campo = nome => new RegExp(`<dd:${nome}>([^<]*)</dd:${nome}>`).exec(bloco)?.[1]?.trim();
-        if (!['toner', 'ink'].includes(campo('ConsumableTypeEnum'))) continue;
-        if (campo('IsRefilled') === 'true') recarregado = true;
-        const perc = Number.parseInt(campo('ConsumablePercentageLevelRemaining'), 10);
-        if (Number.isNaN(perc)) continue;
-        for (const letra of campo('ConsumableLabelCode') || '') {
-            const nome = CORES_LEDM[letra];
-            if (nome && !porCor.has(nome)) porCor.set(nome, { nome, percentual: Math.max(0, Math.min(100, perc)) });
-        }
-    }
-    return { suprimentos: ORDEM_CORES.filter(c => porCor.has(c)).map(c => porCor.get(c)), recarregado };
-}
-
-function obterConsumiveisHP(ip) {
-    return new Promise(resolve => {
-        const vazio = { suprimentos: [], recarregado: false };
-        const req = http.get({ host: ip, port: 80, path: '/DevMgmt/ConsumableConfigDyn.xml', timeout: 2000 }, res => {
-            if (res.statusCode !== 200) { res.resume(); return resolve(vazio); }
-            let xml = '';
-            res.setEncoding('utf8');
-            res.on('data', parte => { if (xml.length < 512 * 1024) xml += parte; });
-            res.on('end', () => resolve(interpretarConsumiveisHP(xml)));
-        });
-        req.on('timeout', () => req.destroy());
-        req.on('error', () => resolve(vazio));
-    });
-}
-
-// ── Página de suprimentos das HP empresariais (FutureSmart) ───────────────────
-// HP como a LaserJet E42540 enviam nível 0 pelo SNMP quando NÃO sabem o nível
-// (ex.: cartucho de contrato "MC" com garantia encerrada / recarregado), mas a
-// própria página de suprimentos mostra "--%". Ela é consultada quando o SNMP
-// diz 0%, para não exibir um 0% falso nem gerar alerta de tinta crítica.
-const CORES_HP_WEB = { black: 'Preto', cyan: 'Ciano', magenta: 'Magenta', yellow: 'Amarelo' };
-
-// Devolve [{ nome, percentual (null = desconhecido), paginas, garantiaEncerrada }]
-function interpretarSuprimentosHPWeb(html) {
-    const texto = String(html);
-    const garantiaEncerrada = /warranty on this supply has ended|garantia[^.<]*(terminou|encerrad|expirou)/i.test(texto);
-    const blocos = texto.split(/<div class="section consumable-block /).slice(1);
-    const resultado = [];
-    for (const bloco of blocos) {
-        const cor = /^consumable-block-(\w+)/.exec(bloco)?.[1];
-        const nome = CORES_HP_WEB[cor];
-        const percentualTexto = /<p class="data percentage">([^<]*)<\/p>/.exec(bloco)?.[1];
-        if (!nome || percentualTexto === undefined) continue;
-        const numero = /(\d{1,3})\s*%/.exec(percentualTexto);
-        const paginas = Number.parseInt(/-PagesPrintedWithSupply">\s*([\d.,]+)/.exec(bloco)?.[1]?.replace(/[.,]/g, ''), 10);
-        resultado.push({
-            nome,
-            percentual: numero ? Math.min(100, Number(numero[1])) : null,
-            paginas: Number.isNaN(paginas) ? null : paginas,
-            garantiaEncerrada
-        });
-    }
-    return resultado;
-}
-
-function obterSuprimentosHPWeb(ip) {
-    return new Promise(resolve => {
-        const req = https.get({
-            host: ip, path: '/hp/device/InternalPages/Index?id=SuppliesStatus', timeout: 3000,
-            rejectUnauthorized: false // certificado autoassinado da própria impressora (somente leitura)
-        }, res => {
-            if (res.statusCode !== 200) { res.resume(); return resolve([]); }
-            let html = '';
-            res.setEncoding('utf8');
-            res.on('data', parte => { if (html.length < 1024 * 1024) html += parte; });
-            res.on('end', () => resolve(interpretarSuprimentosHPWeb(html)));
-        });
-        req.on('timeout', () => req.destroy());
-        req.on('error', () => resolve([]));
-    });
-}
-
-// Confere com a página da HP os itens que o SNMP deu como 0%
-async function conferirZerosHP(ip, suprimentos) {
-    const web = await obterSuprimentosHPWeb(ip);
-    if (!web.length) return { suprimentos, aviso: null };
-    const desconhecidos = [];
-    const conferidos = [];
-    for (const s of suprimentos) {
-        const item = web.find(w => w.nome === s.nome);
-        if (s.percentual !== 0 || !item) { conferidos.push(s); continue; }
-        if (item.percentual === null) desconhecidos.push(item);
-        else conferidos.push({ ...s, percentual: item.percentual });
-    }
-    if (!desconhecidos.length) return { suprimentos: conferidos, aviso: null };
-    const detalhes = desconhecidos.map(d => [
-        d.garantiaEncerrada ? 'garantia do cartucho encerrada' : null,
-        d.paginas ? `${d.paginas.toLocaleString('pt-BR')} páginas impressas com ele` : null
-    ].filter(Boolean).join(', '));
-    const cores = desconhecidos.map(d => d.nome).join(', ');
-    const aviso = `A HP não informa o nível do toner ${cores}` + (detalhes[0] ? ` (${detalhes[0]})` : '');
-    return { suprimentos: conferidos, aviso };
-}
-
-// Resposta usada para impressoras USB, que não são consultadas pela rede
-const SEM_MONITORAMENTO = Object.freeze({
-    online: false, na_rede: false, portas_abertas: [], suprimentos: [], aviso_suprimento: null,
-    serie_detectada: null, modelo_detectado: null
-});
-
-async function obterDadosSNMP(ip, comunidade) {
-    try {
-        let c = await consultarImpressora(ip, comunidade);
-        // Rede lenta ou pacote perdido: nova tentativa, com mais paciência, antes de
-        // dar a impressora como sem resposta (evita alarmes passageiros)
-        if (!c.online) c = await consultarImpressora(ip, comunidade, { timeout: 2000 });
-        if (!c.online) return { ...SEM_MONITORAMENTO, ...(await verificarPresencaNaRede(ip)) };
-        let suprimentos = interpretarSuprimentos(c.itens, c.corantes);
-        let aviso_suprimento = null;
-        const ehHP = /\bHP\b|hewlett/i.test(`${c.sysDescr} ${c.modelo}`);
-        // HP empresarial manda 0 quando não sabe o nível — conferir na página dela
-        if (ehHP && suprimentos.some(s => s.percentual === 0)) {
-            ({ suprimentos, aviso: aviso_suprimento } = await conferirZerosHP(ip, suprimentos));
-        }
-        // Nenhum nível legível pela MIB padrão — tentar OID proprietário Brother
-        if (suprimentos.length === 0 && !aviso_suprimento) suprimentos = await obterNiveisBrother(ip, comunidade);
-        // ...e a página interna da HP (linha Pro)
-        if (suprimentos.length === 0 && !aviso_suprimento && ehHP) {
-            const hp = await obterConsumiveisHP(ip);
-            suprimentos = hp.suprimentos;
-            if (!suprimentos.length && hp.recarregado) aviso_suprimento = AVISO_RECARREGADO;
-        }
-        return {
-            online: true,
-            na_rede: true,
-            portas_abertas: [],
-            suprimentos,
-            aviso_suprimento,
-            serie_detectada: c.serie || null,
-            modelo_detectado: c.modelo || c.sysDescr || null
-        };
-    } catch (e) {
-        console.error(`Erro SNMP em ${ip}:`, e.message);
-        return { ...SEM_MONITORAMENTO };
-    }
-}
-
-function obterContadorPaginas(ip, comunidade) {
-    return new Promise((resolve) => {
-        const session = snmp.createSession(ip, comunidade || 'public', { timeout: 2000, retries: 0 });
-        session.get(['1.3.6.1.2.1.43.10.2.1.4.1.1'], (err, varbinds) => {
-            session.close();
-            if (err || !varbinds[0] || snmp.isVarbindError(varbinds[0])) { resolve(null); return; }
-            const val = Number(varbinds[0].value);
-            resolve(isNaN(val) || val < 0 ? null : val);
-        });
-    });
-}
-
 async function coletarHistorico() {
     db.all("SELECT id, ip, comunidade, numero_serie FROM impressoras WHERE conexao <> 'usb'", [], async (err, rows) => {
         if (err || !rows.length) return;
@@ -904,38 +555,10 @@ async function coletarHistorico() {
 // Algumas impressoras informam sempre o mesmo nível (ex.: Epson com tinta
 // compatível/a granel ou chip que "zera", cartucho de contrato sempre em 0%).
 // Se nenhuma cor muda há LEITURA_PARADA_DIAS e a impressora imprimiu ao menos
-// LEITURA_PARADA_PAGINAS nesse período, o nível exibido provavelmente não é real.
-const LEITURA_PARADA_DIAS    = 14;
-const LEITURA_PARADA_PAGINAS = 500;
-const SALTO_MAXIMO_CONTADOR  = 50000; // salto maior = contador de outro aparelho (troca no mesmo IP)
-const DIA_MS = 24 * 60 * 60 * 1000;
+// LEITURA_PARADA_PAGINAS nesse período, o nível exibido provavelmente não é real
+// (regras em lib/analise-historico.js).
 
 let leiturasParadas = new Map(); // impressora_id → resultado de detectarLeituraParada
-
-// tinta: [{ cor, percentual, em }], paginas: [{ total, em }] — `em` em milissegundos
-function detectarLeituraParada(tinta, paginas, agora = Date.now()) {
-    if (!tinta.length) return null;
-    const ordenadas = [...tinta].sort((a, b) => a.em - b.em);
-    const ultimaColeta = ordenadas[ordenadas.length - 1].em;
-    const atual = new Map(ordenadas.filter(t => t.em === ultimaColeta).map(t => [t.cor, t.percentual]));
-
-    // O trecho parado começa na mudança mais recente entre todas as cores
-    let desde = ordenadas[0].em;
-    for (const t of ordenadas) {
-        if (atual.has(t.cor) && t.percentual !== atual.get(t.cor) && t.em > desde) desde = t.em;
-    }
-
-    let impressas = 0;
-    const contadores = paginas.filter(p => p.em >= desde && p.total !== null).sort((a, b) => a.em - b.em);
-    for (let i = 1; i < contadores.length; i++) {
-        const delta = contadores[i].total - contadores[i - 1].total;
-        if (delta > 0 && delta <= SALTO_MAXIMO_CONTADOR) impressas += delta;
-    }
-
-    const dias = Math.floor((agora - desde) / DIA_MS);
-    if (dias < LEITURA_PARADA_DIAS || impressas < LEITURA_PARADA_PAGINAS) return null;
-    return { desde: new Date(desde).toISOString(), dias, paginas: impressas, niveis: Object.fromEntries(atual) };
-}
 
 function consultarTodos(sql, params = []) {
     return new Promise((resolve, reject) => db.all(sql, params, (err, rows) => err ? reject(err) : resolve(rows)));
@@ -998,55 +621,9 @@ async function atualizarLeiturasParadas() {
 // ── Previsão de fim de tinta/toner ────────────────────────────────────────────
 // Consumo médio desde a última troca/recarga (nível subiu), por regressão
 // linear do percentual no tempo. Só prevê com pelo menos PREVISAO_MIN_DIAS de
-// dados e queda mínima, para não extrapolar ruído.
-const PREVISAO_JANELA_DIAS   = 90;
-const PREVISAO_MIN_DIAS      = 7;
-const PREVISAO_MIN_QUEDA     = 3;   // pontos percentuais
-const PREVISAO_SUBIDA_TROCA  = 5;   // subida maior que isso = cartucho trocado/recarregado
-const PREVISAO_MAX_DIAS      = 365;
+// dados e queda mínima, para não extrapolar ruído (regras em lib/analise-historico.js).
 
 let previsoesSuprimento = new Map(); // impressora_id → { cor: dias restantes }
-
-// tinta: [{ cor, percentual, em (ms) }] → { Preto: 12, ... } (só cores com previsão confiável)
-function preverFimDosSuprimentos(tinta, agora = Date.now()) {
-    const previsao = {};
-    const inicioJanela = agora - PREVISAO_JANELA_DIAS * DIA_MS;
-    const porCor = new Map();
-    for (const t of tinta) {
-        if (t.em < inicioJanela || typeof t.percentual !== 'number') continue;
-        if (!porCor.has(t.cor)) porCor.set(t.cor, []);
-        porCor.get(t.cor).push(t);
-    }
-    for (const [cor, leituras] of porCor) {
-        leituras.sort((a, b) => a.em - b.em);
-        let inicio = 0;
-        for (let i = 1; i < leituras.length; i++) {
-            if (leituras[i].percentual > leituras[i - 1].percentual + PREVISAO_SUBIDA_TROCA) inicio = i;
-        }
-        const trecho = leituras.slice(inicio);
-        if (trecho.length < 2) continue;
-        const primeira = trecho[0];
-        const ultima = trecho[trecho.length - 1];
-        if (agora - ultima.em > 3 * DIA_MS) continue; // sem leitura recente, a previsão estaria velha
-        if ((ultima.em - primeira.em) / DIA_MS < PREVISAO_MIN_DIAS) continue;
-        if (primeira.percentual - ultima.percentual < PREVISAO_MIN_QUEDA || ultima.percentual <= 0) continue;
-
-        // Inclinação (pontos percentuais por dia) por mínimos quadrados
-        const n = trecho.length;
-        const xs = trecho.map(t => (t.em - primeira.em) / DIA_MS);
-        const ys = trecho.map(t => t.percentual);
-        const mx = xs.reduce((a, b) => a + b, 0) / n;
-        const my = ys.reduce((a, b) => a + b, 0) / n;
-        let num = 0, den = 0;
-        for (let i = 0; i < n; i++) { num += (xs[i] - mx) * (ys[i] - my); den += (xs[i] - mx) ** 2; }
-        const inclinacao = den ? num / den : 0;
-        if (inclinacao >= 0) continue;
-
-        const dias = Math.round(ultima.percentual / -inclinacao);
-        if (dias <= PREVISAO_MAX_DIAS) previsao[cor] = dias;
-    }
-    return previsao;
-}
 
 // Só vale enquanto o nível ao vivo é o mesmo da última coleta (ou menor)
 function previsaoAtual(impressoraId, snmpData) {
@@ -1169,23 +746,6 @@ async function coletarImpressoes() {
                 [novoLastLine, novoLastLineJobpages], (err) => err ? reject(err) : resolve());
         });
     }
-}
-
-// ── Descoberta de dispositivo via SNMP ────────────────────────────────────────
-const FABRICANTES = ['Canon', 'HP', 'Epson', 'Brother', 'Kyocera', 'Samsung'];
-
-async function descobrirImpressora(ip) {
-    const c = await consultarImpressora(ip, 'public', { timeout: 2000 });
-    if (!c.online) {
-        return { online: false, fabricante: '', modelo: '', numero_serie: '', tipo: 'Colorido', material: 'Toner', comunidade: 'public' };
-    }
-    const texto      = `${c.sysDescr} ${c.modelo}`;
-    const fabricante = FABRICANTES.find(f => texto.toLowerCase().includes(f.toLowerCase())) || '';
-    const tipo       = coresDosSuprimentos(c.itens, c.corantes).some(cor => cor !== 'Preto') ? 'Colorido' : 'Mono';
-    const usaTinta   = c.itens.some(it => TIPOS_TINTA.has(it.tipo));
-    const usaToner   = c.itens.some(it => TIPOS_TONER.has(it.tipo));
-    const material   = usaTinta ? 'Tinta' : usaToner ? 'Toner' : (/laser|toner/i.test(texto) ? 'Toner' : 'Tinta');
-    return { online: true, fabricante, modelo: c.modelo || c.sysDescr, numero_serie: c.serie, tipo, material, comunidade: 'public' };
 }
 
 // ── Rotas ─────────────────────────────────────────────────────────────────────
@@ -1445,125 +1005,6 @@ app.post('/api/auth/estoque', limiterAuth, (req, res) => {
     setTimeout(() => res.status(401).json({ ok: false }), 800);
 });
 
-// ── Gerador de PDF mínimo para impressão ─────────────────────────────────────
-function gerarPDF(texto, relatorio = null) {
-    const esc = s => String(s ?? '')
-        .normalize('NFKD').replace(/[\u0300-\u036f]/g, '')
-        .replace(/[^\x20-\x7E]/g, ' ')
-        .replace(/\\/g, '\\\\').replace(/\(/g, '\\(').replace(/\)/g, '\\)');
-    const num = n => Number(n || 0).toFixed(2).replace(/\.00$/, '');
-    const rgb = {
-        accent: [0.98, 0.40, 0.01], ink: [0.08, 0.10, 0.14], muted: [0.38, 0.41, 0.46],
-        line: [0.86, 0.87, 0.89], ok: [0.06, 0.55, 0.34], warn: [0.88, 0.45, 0.03],
-        bad: [0.75, 0.12, 0.12], cyan: [0.02, 0.62, 0.72], magenta: [0.75, 0.12, 0.55],
-        yellow: [0.90, 0.66, 0.04], black: [0.08, 0.10, 0.14], def: [0.98, 0.40, 0.01],
-        white: [1, 1, 1]
-    };
-    const c = arr => `${num(arr[0])} ${num(arr[1])} ${num(arr[2])}`;
-    const corTinta = nome => {
-        const n = String(nome || '').toLowerCase();
-        if (n.includes('cyan') || n.includes('ciano')) return rgb.cyan;
-        if (n.includes('magenta')) return rgb.magenta;
-        if (n.includes('yellow') || n.includes('amarelo')) return rgb.yellow;
-        if (n.includes('black') || n.includes('preto')) return rgb.black;
-        return rgb.def;
-    };
-    const pages = [];
-    let ops = [];
-    let y = 800;
-    const margin = 42, width = 595, height = 842, usable = width - margin * 2;
-    const newPage = () => { if (ops.length) pages.push(ops.join('\n')); ops = []; y = 800; };
-    const ensure = h => { if (y - h < 44) newPage(); };
-    const rect = (x, ry, w, h, color) => ops.push(`q ${c(color)} rg ${num(x)} ${num(ry)} ${num(w)} ${num(h)} re f Q`);
-    const textAt = (s, x, ty, size = 10, color = rgb.ink, font = 'F1') =>
-        ops.push(`BT /${font} ${size} Tf ${c(color)} rg ${num(x)} ${num(ty)} Td (${esc(s)}) Tj ET`);
-    const wrap = (s, max = 88) => {
-        const words = esc(s).split(/\s+/).filter(Boolean);
-        const lines = [];
-        let cur = '';
-        words.forEach(w => {
-            if ((cur + ' ' + w).trim().length > max) { if (cur) lines.push(cur); cur = w; }
-            else cur = (cur + ' ' + w).trim();
-        });
-        if (cur) lines.push(cur);
-        return lines.length ? lines : [''];
-    };
-    const section = title => {
-        ensure(38);
-        y -= 16;
-        rect(margin, y - 5, 5, 20, rgb.accent);
-        textAt(title, margin + 12, y, 13, rgb.ink, 'F2');
-        y -= 18;
-        rect(margin, y, usable, 0.8, rgb.line);
-        y -= 10;
-    };
-    const bodyLines = raw => {
-        String(raw || '').split('\n').forEach(line => {
-            const clean = line.replace(/\s*\|\s*/g, '   ');
-            if (!clean.trim()) { y -= 6; return; }
-            wrap(clean, 96).forEach(l => {
-                ensure(14);
-                textAt(l, margin, y, 9, rgb.ink);
-                y -= 13;
-            });
-        });
-    };
-    const tintaBars = rows => {
-        const latest = {};
-        (Array.isArray(rows) ? rows : []).forEach(r => {
-            const cor = r.cor || r.nome || 'Tinta';
-            if (!latest[cor] || String(r.dia || '') >= String(latest[cor].dia || '')) latest[cor] = r;
-        });
-        Object.values(latest).forEach(r => {
-            const pct = Math.max(0, Math.min(100, Number(r.percentual_medio ?? r.percentual ?? 0)));
-            ensure(36);
-            textAt(`${r.cor || r.nome || 'Tinta'} - ${pct}%`, margin, y, 10, pct <= 10 ? rgb.bad : pct <= 25 ? rgb.warn : rgb.ink, 'F2');
-            y -= 14;
-            rect(margin, y, usable, 10, rgb.line);
-            rect(margin, y, usable * pct / 100, 10, corTinta(r.cor || r.nome));
-            y -= 20;
-        });
-    };
-
-    rect(0, 786, width, 56, rgb.accent);
-    textAt(relatorio?.titulo || 'Relatorio de impressoras', margin, 812, 18, rgb.white, 'F2');
-    textAt(`Gerado em ${new Date().toLocaleString('pt-BR')}`, margin, 794, 9, rgb.white);
-    y = 760;
-    if (relatorio && Array.isArray(relatorio.secoes)) {
-        relatorio.secoes.forEach(secao => {
-            section(secao.titulo || 'Secao');
-            if (Array.isArray(secao.tinta) && secao.tinta.length) tintaBars(secao.tinta);
-            bodyLines(secao.texto || '');
-        });
-    } else {
-        section('Conteudo');
-        bodyLines(texto);
-    }
-    newPage();
-
-    const objects = ['1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n'];
-    const kids = pages.map((_, i) => `${3 + i * 2} 0 R`).join(' ');
-    objects.push(`2 0 obj\n<< /Type /Pages /Kids [${kids}] /Count ${pages.length} >>\nendobj\n`);
-    pages.forEach((stream, i) => {
-        const pageObj = 3 + i * 2, contentObj = pageObj + 1;
-        objects.push(`${pageObj} 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${width} ${height}] /Contents ${contentObj} 0 R /Resources << /Font << /F1 ${3 + pages.length * 2} 0 R /F2 ${4 + pages.length * 2} 0 R >> >> >>\nendobj\n`);
-        objects.push(`${contentObj} 0 obj\n<< /Length ${Buffer.byteLength(stream, 'latin1')} >>\nstream\n${stream}\nendstream\nendobj\n`);
-    });
-    const font1 = 3 + pages.length * 2, font2 = font1 + 1;
-    objects.push(`${font1} 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n`);
-    objects.push(`${font2} 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>\nendobj\n`);
-    const hdr = '%PDF-1.4\n';
-    const offsets = [];
-    let pos = Buffer.byteLength(hdr, 'latin1');
-    objects.forEach(o => { offsets.push(pos); pos += Buffer.byteLength(o, 'latin1'); });
-    const xrefPos = pos;
-    const p = n => String(n).padStart(10, '0');
-    const xref = 'xref\n0 ' + (objects.length + 1) + '\n0000000000 65535 f \r\n' +
-        offsets.map(o => `${p(o)} 00000 n \r\n`).join('');
-    const trailer = `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefPos}\n%%EOF\n`;
-    return Buffer.concat([hdr, ...objects, xref, trailer].map(s => Buffer.from(s, 'latin1')));
-}
-
 // ── Impressão via IPP + PDF (Canon MF / AirPrint) ────────────────────────────
 app.post('/api/impressoras/:id/imprimir', exigirPermissao('imprimir'), (req, res, next) => {
     const { conteudo, relatorio } = req.body;
@@ -1816,16 +1257,6 @@ app.post('/api/relatorios/trocas-toner', exigirPermissao('relatorios'), (req, re
 // almoço; medir 24h fazia todas parecerem indisponíveis. A disponibilidade
 // considera só seg–sex dentro de EXPEDIENTE ("08-12,14-17" = 8h–12h e 14h–17h),
 // no fuso FUSO_HORARIO_HORAS (Fortaleza = -3). O valor 24h segue como referência.
-function horasDoExpediente(texto) {
-    const horas = new Set();
-    for (const faixa of String(texto || '').split(',')) {
-        const m = /^\s*(\d{1,2})\s*-\s*(\d{1,2})\s*$/.exec(faixa);
-        if (!m) continue;
-        for (let h = Number(m[1]); h < Number(m[2]) && h < 24; h++) horas.add(h);
-    }
-    return [...horas].sort((a, b) => a - b);
-}
-
 const HORAS_EXPEDIENTE = (() => {
     const horas = horasDoExpediente(process.env.EXPEDIENTE || '08-12,14-17');
     return horas.length ? horas : horasDoExpediente('08-12,14-17');
@@ -1884,29 +1315,6 @@ app.get('/api/relatorios/auditoria', exigirPermissao('relatorios'), (req, res, n
         }
     );
 });
-
-// Estoque × consumo: para cada item do estoque, soma o consumo (pontos
-// percentuais por dia) das impressoras abastecidas por aquele grupo — antes
-// somava qualquer impressora da mesma cor, de qualquer modelo. Uma unidade em
-// estoque = 100% de um cartucho/garrafa.
-function consumoDiarioPorImpressora(historico) {
-    const series = new Map();
-    for (const h of historico) {
-        const chave = `${h.impressora_id}|${h.cor}`;
-        if (!series.has(chave)) series.set(chave, []);
-        series.get(chave).push({ percentual: h.percentual, em: Date.parse(h.coletado_em) });
-    }
-    const consumo = new Map();
-    for (const [chave, leituras] of series) {
-        leituras.sort((a, b) => a.em - b.em);
-        const dias = (leituras[leituras.length - 1].em - leituras[0].em) / DIA_MS;
-        if (dias < 1) continue;
-        let quedas = 0;
-        for (let i = 1; i < leituras.length; i++) quedas += Math.max(0, leituras[i - 1].percentual - leituras[i].percentual);
-        consumo.set(chave, quedas / dias);
-    }
-    return consumo;
-}
 
 app.get('/api/relatorios/estoque', exigirPermissao('relatorios'), async (req, res, next) => {
     try {

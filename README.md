@@ -19,7 +19,13 @@ Sistema web para cadastro, monitoramento e administracao de impressoras em rede.
 ```text
 monitor-impressoras/
   backend/
-    server.js          # API Express, banco SQLite, SNMP, autenticacao e relatorios
+    server.js          # API Express, banco SQLite, autenticacao, rotas e relatorios
+    lib/
+      leitura-impressora.js  # Leitura das impressoras: SNMP, paginas internas HP, presenca na rede
+      analise-historico.js   # Leitura parada, previsao de fim do toner, consumo, expediente
+      pdf.js                 # Gerador de PDF minimo para envio de impressao
+    scripts/           # Scripts de manutencao (ex.: correcao de cadastro)
+    tests/             # Testes automatizados (Jest)
     package.json       # Dependencias e scripts Node.js
     banco.db           # Banco SQLite local
     .env.example       # Exemplo de variaveis de ambiente
