@@ -779,7 +779,10 @@ const SEM_MONITORAMENTO = Object.freeze({
 
 async function obterDadosSNMP(ip, comunidade) {
     try {
-        const c = await consultarImpressora(ip, comunidade);
+        let c = await consultarImpressora(ip, comunidade);
+        // Rede lenta ou pacote perdido: nova tentativa, com mais paciência, antes de
+        // dar a impressora como sem resposta (evita alarmes passageiros)
+        if (!c.online) c = await consultarImpressora(ip, comunidade, { timeout: 2000 });
         if (!c.online) return { ...SEM_MONITORAMENTO, ...(await verificarPresencaNaRede(ip)) };
         let suprimentos = interpretarSuprimentos(c.itens, c.corantes);
         let aviso_suprimento = null;
