@@ -1120,8 +1120,23 @@ app.get('/api/relatorios/impressoras', exigirPermissao('relatorios'), (req, res,
 
 const JANELA_PAGINAS_DIAS = { hora: 2, dia: 30, mes: 365, ano: 5 * 365 };
 
+// A coleta grava o contador de hora em hora; ao abrir o relatório, lê o
+// contador agora e grava se mudou, para a impressão recém-feita já aparecer.
+async function registrarContadorAgora(impressoraId) {
+    const [imp] = await consultarTodos('SELECT id, ip, comunidade, conexao FROM impressoras WHERE id = ?', [impressoraId]);
+    if (!imp || ehUSB(imp) || !imp.ip) return;
+    const total = await obterContadorPaginas(imp.ip, imp.comunidade);
+    if (total === null) return;
+    const [ultima] = await consultarTodos(
+        'SELECT paginas_total FROM historico_paginas WHERE impressora_id = ? ORDER BY coletado_em DESC LIMIT 1', [imp.id]);
+    if (ultima && ultima.paginas_total === total) return;
+    await executar('INSERT INTO historico_paginas (impressora_id, paginas_total, coletado_em) VALUES (?, ?, ?)',
+        [imp.id, total, new Date().toISOString()]);
+}
+
 app.get('/api/relatorios/paginas/:id', exigirPermissao('relatorios'), async (req, res, next) => {
     try {
+        await registrarContadorAgora(req.params.id);
         const periodo = JANELA_PAGINAS_DIAS[req.query.periodo] ? req.query.periodo : 'dia';
         const desde = Date.now() - JANELA_PAGINAS_DIAS[periodo] * DIA_MS;
         const desdeIso = new Date(desde).toISOString();
