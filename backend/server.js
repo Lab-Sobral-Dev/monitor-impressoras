@@ -3,6 +3,7 @@ const sqlite3      = require('sqlite3').verbose();
 const snmp         = require('net-snmp');
 const net          = require('net');
 const http         = require('http');
+const https        = require('https');
 const helmet       = require('helmet');
 const cors         = require('cors');
 const rateLimit    = require('express-rate-limit');
@@ -701,6 +702,75 @@ function obterConsumiveisHP(ip) {
     });
 }
 
+// ── Página de suprimentos das HP empresariais (FutureSmart) ───────────────────
+// HP como a LaserJet E42540 enviam nível 0 pelo SNMP quando NÃO sabem o nível
+// (ex.: cartucho de contrato "MC" com garantia encerrada / recarregado), mas a
+// própria página de suprimentos mostra "--%". Ela é consultada quando o SNMP
+// diz 0%, para não exibir um 0% falso nem gerar alerta de tinta crítica.
+const CORES_HP_WEB = { black: 'Preto', cyan: 'Ciano', magenta: 'Magenta', yellow: 'Amarelo' };
+
+// Devolve [{ nome, percentual (null = desconhecido), paginas, garantiaEncerrada }]
+function interpretarSuprimentosHPWeb(html) {
+    const texto = String(html);
+    const garantiaEncerrada = /warranty on this supply has ended|garantia[^.<]*(terminou|encerrad|expirou)/i.test(texto);
+    const blocos = texto.split(/<div class="section consumable-block /).slice(1);
+    const resultado = [];
+    for (const bloco of blocos) {
+        const cor = /^consumable-block-(\w+)/.exec(bloco)?.[1];
+        const nome = CORES_HP_WEB[cor];
+        const percentualTexto = /<p class="data percentage">([^<]*)<\/p>/.exec(bloco)?.[1];
+        if (!nome || percentualTexto === undefined) continue;
+        const numero = /(\d{1,3})\s*%/.exec(percentualTexto);
+        const paginas = Number.parseInt(/-PagesPrintedWithSupply">\s*([\d.,]+)/.exec(bloco)?.[1]?.replace(/[.,]/g, ''), 10);
+        resultado.push({
+            nome,
+            percentual: numero ? Math.min(100, Number(numero[1])) : null,
+            paginas: Number.isNaN(paginas) ? null : paginas,
+            garantiaEncerrada
+        });
+    }
+    return resultado;
+}
+
+function obterSuprimentosHPWeb(ip) {
+    return new Promise(resolve => {
+        const req = https.get({
+            host: ip, path: '/hp/device/InternalPages/Index?id=SuppliesStatus', timeout: 3000,
+            rejectUnauthorized: false // certificado autoassinado da própria impressora (somente leitura)
+        }, res => {
+            if (res.statusCode !== 200) { res.resume(); return resolve([]); }
+            let html = '';
+            res.setEncoding('utf8');
+            res.on('data', parte => { if (html.length < 1024 * 1024) html += parte; });
+            res.on('end', () => resolve(interpretarSuprimentosHPWeb(html)));
+        });
+        req.on('timeout', () => req.destroy());
+        req.on('error', () => resolve([]));
+    });
+}
+
+// Confere com a página da HP os itens que o SNMP deu como 0%
+async function conferirZerosHP(ip, suprimentos) {
+    const web = await obterSuprimentosHPWeb(ip);
+    if (!web.length) return { suprimentos, aviso: null };
+    const desconhecidos = [];
+    const conferidos = [];
+    for (const s of suprimentos) {
+        const item = web.find(w => w.nome === s.nome);
+        if (s.percentual !== 0 || !item) { conferidos.push(s); continue; }
+        if (item.percentual === null) desconhecidos.push(item);
+        else conferidos.push({ ...s, percentual: item.percentual });
+    }
+    if (!desconhecidos.length) return { suprimentos: conferidos, aviso: null };
+    const detalhes = desconhecidos.map(d => [
+        d.garantiaEncerrada ? 'garantia do cartucho encerrada' : null,
+        d.paginas ? `${d.paginas.toLocaleString('pt-BR')} páginas impressas com ele` : null
+    ].filter(Boolean).join(', '));
+    const cores = desconhecidos.map(d => d.nome).join(', ');
+    const aviso = `A HP não informa o nível do toner ${cores}` + (detalhes[0] ? ` (${detalhes[0]})` : '');
+    return { suprimentos: conferidos, aviso };
+}
+
 // Resposta usada para impressoras USB, que não são consultadas pela rede
 const SEM_MONITORAMENTO = Object.freeze({
     online: false, na_rede: false, portas_abertas: [], suprimentos: [], aviso_suprimento: null,
@@ -713,10 +783,15 @@ async function obterDadosSNMP(ip, comunidade) {
         if (!c.online) return { ...SEM_MONITORAMENTO, ...(await verificarPresencaNaRede(ip)) };
         let suprimentos = interpretarSuprimentos(c.itens, c.corantes);
         let aviso_suprimento = null;
+        const ehHP = /\bHP\b|hewlett/i.test(`${c.sysDescr} ${c.modelo}`);
+        // HP empresarial manda 0 quando não sabe o nível — conferir na página dela
+        if (ehHP && suprimentos.some(s => s.percentual === 0)) {
+            ({ suprimentos, aviso: aviso_suprimento } = await conferirZerosHP(ip, suprimentos));
+        }
         // Nenhum nível legível pela MIB padrão — tentar OID proprietário Brother
-        if (suprimentos.length === 0) suprimentos = await obterNiveisBrother(ip, comunidade);
-        // ...e a página interna da HP
-        if (suprimentos.length === 0 && /\bHP\b|hewlett/i.test(`${c.sysDescr} ${c.modelo}`)) {
+        if (suprimentos.length === 0 && !aviso_suprimento) suprimentos = await obterNiveisBrother(ip, comunidade);
+        // ...e a página interna da HP (linha Pro)
+        if (suprimentos.length === 0 && !aviso_suprimento && ehHP) {
             const hp = await obterConsumiveisHP(ip);
             suprimentos = hp.suprimentos;
             if (!suprimentos.length && hp.recarregado) aviso_suprimento = AVISO_RECARREGADO;
@@ -1662,7 +1737,7 @@ app.use((err, req, res, next) => {
     res.status(500).json({ erro: 'Erro interno do servidor' });
 });
 
-module.exports = { app, db, dbReady, estoqueTokens, parsePageLogLine, coletarImpressoes, interpretarSuprimentos, serieDivergente, verificarPresencaNaRede, interpretarConsumiveisHP,
+module.exports = { app, db, dbReady, estoqueTokens, parsePageLogLine, coletarImpressoes, interpretarSuprimentos, serieDivergente, verificarPresencaNaRede, interpretarConsumiveisHP, interpretarSuprimentosHPWeb,
     detectarLeituraParada, atualizarLeiturasParadas };
 
 // ── Inicialização e graceful shutdown (apenas quando executado diretamente) ────
