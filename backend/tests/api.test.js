@@ -314,6 +314,70 @@ describe('PUT /api/impressoras/:id', () => {
     });
 });
 
+// ── Impressora conectada via USB ─────────────────────────────────────────────
+describe('Impressora USB', () => {
+    const USB = { nome: 'HP', modelo: 'HP LaserJet Pro MFP 4103fdw', localizacao: 'Microbiológico', conexao: 'usb' };
+
+    async function buscar(filtro) {
+        const lista = await request(app).get('/api/impressoras').set(await authAdmin());
+        return lista.body.find(filtro);
+    }
+
+    it('deve cadastrar sem IP quando a conexão é USB', async () => {
+        const res = await request(app).post('/api/impressoras').set(await authAdmin()).send(USB);
+        expect(res.status).toBe(201);
+        expect(await buscar(p => p.localizacao === 'Microbiológico')).toMatchObject({ conexao: 'usb', ip: null });
+    });
+
+    it('deve exigir IP quando a conexão é de rede', async () => {
+        const res = await request(app).post('/api/impressoras').set(await authAdmin()).send({ ...USB, conexao: 'rede' });
+        expect(res.status).toBe(400);
+        expect(res.body.erro).toMatch(/ip é obrigatório/);
+    });
+
+    it('deve recusar tipo de conexão desconhecido', async () => {
+        const res = await request(app).post('/api/impressoras').set(await authAdmin()).send({ ...IMP_VALIDA, conexao: 'bluetooth' });
+        expect(res.status).toBe(400);
+        expect(res.body.erro).toMatch(/conexao/);
+    });
+
+    it('impressora cadastrada sem informar conexão é de rede', async () => {
+        const id = await criarImpressora();
+        expect((await buscar(p => p.id === id)).conexao).toBe('rede');
+    });
+
+    it('deve trocar de rede para USB (limpa o IP) e voltar exigindo IP', async () => {
+        const id = await criarImpressora();
+        let res = await request(app).put(`/api/impressoras/${id}`).set(await authAdmin()).send({ conexao: 'usb' });
+        expect(res.status).toBe(200);
+        expect(await buscar(p => p.id === id)).toMatchObject({ conexao: 'usb', ip: null });
+
+        res = await request(app).put(`/api/impressoras/${id}`).set(await authAdmin()).send({ conexao: 'rede' });
+        expect(res.status).toBe(400);
+
+        res = await request(app).put(`/api/impressoras/${id}`).set(await authAdmin()).send({ conexao: 'rede', ip: '192.168.1.77' });
+        expect(res.status).toBe(200);
+        expect(await buscar(p => p.id === id)).toMatchObject({ conexao: 'rede', ip: '192.168.1.77' });
+    });
+
+    it('não deve enviar impressão pela rede para impressora USB', async () => {
+        await request(app).post('/api/impressoras').set(await authAdmin()).send(USB);
+        const { id } = await buscar(p => p.conexao === 'usb');
+        const res = await request(app).post(`/api/impressoras/${id}/imprimir`).set(await authAdmin()).send({ conteudo: 'teste' });
+        expect(res.status).toBe(400);
+        expect(res.body.erro).toMatch(/USB/);
+    });
+
+    it('deve ficar fora do relatório de disponibilidade', async () => {
+        await request(app).post('/api/impressoras').set(await authAdmin()).send(USB);
+        await criarImpressora();
+        const res = await request(app).get('/api/relatorios/disponibilidade').set(await authAdmin());
+        expect(res.status).toBe(200);
+        expect(res.body.length).toBe(1);
+        expect(res.body[0].ip).toBe(IMP_VALIDA.ip);
+    });
+});
+
 // ── DELETE /api/impressoras/:id ───────────────────────────────────────────────
 describe('DELETE /api/impressoras/:id', () => {
     it('deve retornar 404 quando id não existe', async () => {

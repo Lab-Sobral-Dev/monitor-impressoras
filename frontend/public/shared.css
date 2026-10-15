@@ -68,6 +68,7 @@ body {
 .sbadge { padding: 4px 10px; border-radius: 4px; font-size: 11px; font-weight: 700; flex-shrink: 0; }
 .sbadge.on  { background: #ecfdf5; color: #059669; }
 .sbadge.off { background: #fef2f2; color: #dc2626; animation: blink 2s 6 forwards; }
+.sbadge.usb { background: #f1f5f9; color: #475569; }
 
 /* ── Loader overlay ─────────────────────────────────────────────────────────── */
 .loader { position: fixed; inset: 0; background: rgba(244,244,244,.8); display: flex; align-items: center; justify-content: center; z-index: 200; opacity: 0; pointer-events: none; transition: opacity .3s; }
@@ -115,3 +116,4 @@ body {
 
 [data-theme="dark"] .sbadge.on  { background: rgba(16,185,129,.15); color: #34d399; }
 [data-theme="dark"] .sbadge.off { background: rgba(239,68,68,.15);  color: #f87171; }
+[data-theme="dark"] .sbadge.usb { background: rgba(100,116,139,.18); color: #cbd5e1; }

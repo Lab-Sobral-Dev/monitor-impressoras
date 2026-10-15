@@ -21,15 +21,23 @@ app.set('trust proxy', 1);
 // ── Validação de IP e campos de impressora ────────────────────────────────────
 const IPV4_RE = /^((25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(25[0-5]|2[0-4]\d|[01]?\d\d?)$/;
 
+// Impressora conectada via USB: sem IP, sem consulta SNMP nem histórico de status
+const CONEXOES = ['rede', 'usb'];
+
+function ehUSB(imp) {
+    return imp?.conexao === 'usb';
+}
+
 function validarImpressora(body, obrigatorio = true) {
     const erros = [];
-    const { nome, ip, modelo } = body;
+    const { nome, ip, modelo, conexao } = body;
     if (obrigatorio || nome !== undefined) {
         if (!nome || typeof nome !== 'string' || !nome.trim()) erros.push('nome é obrigatório');
     }
-    if (obrigatorio || ip !== undefined) {
-        if (ip !== undefined && !IPV4_RE.test(String(ip).trim())) erros.push('ip inválido (use formato IPv4)');
-    }
+    if (conexao !== undefined && !CONEXOES.includes(conexao)) erros.push("conexao deve ser 'rede' ou 'usb'");
+    const ipTexto = String(ip ?? '').trim();
+    if (ipTexto && !IPV4_RE.test(ipTexto)) erros.push('ip inválido (use formato IPv4)');
+    else if (obrigatorio && !ipTexto && conexao !== 'usb') erros.push('ip é obrigatório para impressora de rede');
     if (obrigatorio || modelo !== undefined) {
         if (!modelo || typeof modelo !== 'string' || !modelo.trim()) erros.push('modelo é obrigatório');
     }
@@ -91,7 +99,7 @@ async function refreshDashCache(rows) {
     dashRefreshing = true;
     try {
         const resultados = await Promise.all(rows.map(async (imp) => {
-            const snmpData = await obterDadosSNMP(imp.ip, imp.comunidade);
+            const snmpData = ehUSB(imp) ? SEM_MONITORAMENTO : await obterDadosSNMP(imp.ip, imp.comunidade);
             return {
                 ...imp, material: imp.material || 'Toner', tipo: imp.tipo || 'Colorido', ...snmpData,
                 aparelho_divergente: serieDivergente(imp.numero_serie, snmpData.serie_detectada)
@@ -277,6 +285,7 @@ const dbReady = new Promise(resolve => {
         db.run(`ALTER TABLE impressoras ADD COLUMN material TEXT`, () => {});
         db.run(`ALTER TABLE impressoras ADD COLUMN tipo TEXT`, () => {});
         db.run(`ALTER TABLE impressoras ADD COLUMN numero_serie TEXT`, () => {});
+        db.run(`ALTER TABLE impressoras ADD COLUMN conexao TEXT NOT NULL DEFAULT 'rede'`, () => {});
         db.run(`UPDATE impressoras SET material = 'Toner' WHERE material IS NULL`);
         db.run(`UPDATE impressoras SET tipo = 'Colorido' WHERE tipo IS NULL`);
         db.run(`CREATE TABLE IF NOT EXISTS estoque (
@@ -620,6 +629,9 @@ async function consultarImpressora(ip, comunidade, { timeout = 1000 } = {}) {
     }
 }
 
+// Resposta usada para impressoras USB, que não são consultadas pela rede
+const SEM_MONITORAMENTO = Object.freeze({ online: false, suprimentos: [], serie_detectada: null, modelo_detectado: null });
+
 async function obterDadosSNMP(ip, comunidade) {
     try {
         const c = await consultarImpressora(ip, comunidade);
@@ -652,7 +664,7 @@ function obterContadorPaginas(ip, comunidade) {
 }
 
 async function coletarHistorico() {
-    db.all('SELECT id, ip, comunidade, numero_serie FROM impressoras', [], async (err, rows) => {
+    db.all("SELECT id, ip, comunidade, numero_serie FROM impressoras WHERE conexao <> 'usb'", [], async (err, rows) => {
         if (err || !rows.length) return;
         const agora = new Date().toISOString();
         for (const imp of rows) {
@@ -805,7 +817,7 @@ async function descobrirImpressora(ip) {
 // ── Rotas ─────────────────────────────────────────────────────────────────────
 
 app.get('/api/dashboard', exigirAlgumaPermissao(['dashboard', 'estoque']), (req, res, next) => {
-    db.all('SELECT id, nome, ip, modelo, localizacao, comunidade, tipo, material, numero_serie FROM impressoras', [], async (err, rows) => {
+    db.all('SELECT id, nome, ip, modelo, localizacao, comunidade, tipo, material, numero_serie, conexao FROM impressoras', [], async (err, rows) => {
         if (err) { console.error(err); return next(err); }
 
         const cacheValido = dashCache && Date.now() - dashCacheAt < DASH_TTL;
@@ -833,7 +845,7 @@ app.get('/api/dashboard', exigirAlgumaPermissao(['dashboard', 'estoque']), (req,
 });
 
 app.get('/api/impressoras', exigirAlgumaPermissao(['impressoras', 'estoque', 'relatorios']), (req, res, next) => {
-    db.all('SELECT id, nome AS fabricante, ip, modelo, localizacao, comunidade, tipo, material, numero_serie FROM impressoras ORDER BY id ASC', [], (err, rows) => {
+    db.all('SELECT id, nome AS fabricante, ip, modelo, localizacao, comunidade, tipo, material, numero_serie, conexao FROM impressoras ORDER BY id ASC', [], (err, rows) => {
         if (err) return next(err);
         res.json(rows);
     });
@@ -844,9 +856,10 @@ app.post('/api/impressoras', exigirPermissao('impressoras'), (req, res, next) =>
     if (erros.length) return res.status(400).json({ erro: erros.join('; ') });
 
     const { nome, ip, modelo, localizacao, comunidade, tipo, material, numero_serie } = req.body;
+    const conexao = req.body.conexao || 'rede';
     db.run(
-        `INSERT INTO impressoras (nome, ip, modelo, localizacao, comunidade, tipo, material, numero_serie) VALUES (?,?,?,?,?,?,?,?)`,
-        [nome.trim(), ip.trim(), modelo.trim(), localizacao, comunidade || 'public', tipo || 'Colorido', material || 'Toner', numero_serie?.trim() || null],
+        `INSERT INTO impressoras (nome, ip, modelo, localizacao, comunidade, tipo, material, numero_serie, conexao) VALUES (?,?,?,?,?,?,?,?,?)`,
+        [nome.trim(), conexao === 'usb' ? null : ip.trim(), modelo.trim(), localizacao, comunidade || 'public', tipo || 'Colorido', material || 'Toner', numero_serie?.trim() || null, conexao],
         (err) => {
             if (err) { console.error(err); return next(err); }
             invalidarCacheDash();
@@ -859,21 +872,25 @@ app.put('/api/impressoras/:id', exigirPermissao('impressoras'), (req, res, next)
     const erros = validarImpressora(req.body, false);
     if (erros.length) return res.status(400).json({ erro: erros.join('; ') });
 
-    const { nome, modelo, ip, localizacao, comunidade, tipo, material, numero_serie } = req.body;
+    const { nome, modelo, ip, localizacao, comunidade, tipo, material, numero_serie, conexao } = req.body;
     db.get('SELECT * FROM impressoras WHERE id = ?', [req.params.id], (err, existing) => {
         if (err) { console.error(err); return next(err); }
         if (!existing) return res.status(404).json({ erro: 'Impressora não encontrada' });
+        const conexaoFinal = conexao ?? existing.conexao ?? 'rede';
+        const ipFinal = conexaoFinal === 'usb' ? null : (String(ip ?? existing.ip ?? '').trim() || null);
+        if (!ipFinal && conexaoFinal === 'rede') return res.status(400).json({ erro: 'ip é obrigatório para impressora de rede' });
         db.run(
-            `UPDATE impressoras SET nome = ?, modelo = ?, ip = ?, localizacao = ?, comunidade = ?, tipo = ?, material = ?, numero_serie = ? WHERE id = ?`,
+            `UPDATE impressoras SET nome = ?, modelo = ?, ip = ?, localizacao = ?, comunidade = ?, tipo = ?, material = ?, numero_serie = ?, conexao = ? WHERE id = ?`,
             [
                 (nome        ?? existing.nome)?.trim?.()    ?? existing.nome,
                 (modelo      ?? existing.modelo)?.trim?.()  ?? existing.modelo,
-                (ip          ?? existing.ip)?.trim?.()      ?? existing.ip,
+                ipFinal,
                 localizacao  ?? existing.localizacao,
                 comunidade   ?? existing.comunidade,
                 tipo         ?? existing.tipo,
                 material     ?? existing.material,
                 numero_serie === undefined ? existing.numero_serie : (numero_serie?.trim() || null),
+                conexaoFinal,
                 req.params.id
             ],
             function (err) {
@@ -1173,6 +1190,7 @@ app.post('/api/impressoras/:id/imprimir', exigirPermissao('imprimir'), (req, res
 
     db.get('SELECT * FROM impressoras WHERE id = ?', [req.params.id], (err, imp) => {
         if (err || !imp) return res.status(404).json({ erro: 'Impressora não encontrada' });
+        if (ehUSB(imp)) return res.status(400).json({ erro: 'Impressora conectada via USB não recebe impressão pela rede' });
 
         const docBuf = gerarPDF(conteudo, relatorio);
 
@@ -1260,10 +1278,10 @@ app.get('/api/descobrir', limiterDescoberta, async (req, res, next) => {
 // ── Relatórios ────────────────────────────────────────────────────────────────
 
 app.get('/api/relatorios/impressoras', exigirPermissao('relatorios'), (req, res, next) => {
-    db.all('SELECT id, nome, ip, modelo, localizacao, tipo, material, comunidade, numero_serie FROM impressoras ORDER BY nome ASC', [], async (err, rows) => {
+    db.all('SELECT id, nome, ip, modelo, localizacao, tipo, material, comunidade, numero_serie, conexao FROM impressoras ORDER BY nome ASC', [], async (err, rows) => {
         if (err) return next(err);
         const resultados = await Promise.all(rows.map(async (imp) => {
-            const [snmpData, paginas] = await Promise.all([
+            const [snmpData, paginas] = ehUSB(imp) ? [SEM_MONITORAMENTO, null] : await Promise.all([
                 obterDadosSNMP(imp.ip, imp.comunidade || 'public'),
                 obterContadorPaginas(imp.ip, imp.comunidade || 'public')
             ]);
@@ -1422,6 +1440,7 @@ app.get('/api/relatorios/disponibilidade', exigirPermissao('relatorios'), (req, 
          FROM impressoras i
          LEFT JOIN historico_status h
                 ON h.impressora_id = i.id AND h.registrado_em >= datetime('now', '-30 days')
+         WHERE i.conexao <> 'usb'
          GROUP BY i.id ORDER BY uptime_pct ASC, i.nome ASC`,
         [], (err, rows) => {
             if (err) return next(err);

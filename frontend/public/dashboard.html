@@ -132,10 +132,10 @@
   function dadosFiltrados() {
     const q = (document.getElementById('si').value || '').toLowerCase();
     return dadosCache.filter(p => {
-      const txt = (p.nome + p.ip + (p.modelo||'') + (p.localizacao||'')).toLowerCase();
+      const txt = (p.nome + enderecoImpressora(p) + (p.modelo||'') + (p.localizacao||'')).toLowerCase();
       if (!txt.includes(q)) return false;
       if (filtroAtivo === 'on')  return p.online;
-      if (filtroAtivo === 'off') return !p.online;
+      if (filtroAtivo === 'off') return estaOffline(p);
       if (filtroAtivo === 'low') return tBaixa(p.suprimentos);
       return true;
     });
@@ -169,7 +169,7 @@
 
     document.getElementById('tot').textContent = dadosCache.length;
     document.getElementById('onl').textContent = dadosCache.filter(p => p.online).length;
-    document.getElementById('ofl').textContent = dadosCache.filter(p => !p.online).length;
+    document.getElementById('ofl').textContent = dadosCache.filter(estaOffline).length;
     document.getElementById('low').textContent = dadosCache.filter(p => tBaixa(p.suprimentos)).length;
 
     if (!lista.length) {
@@ -188,15 +188,17 @@
       const sup   = Array.isArray(p.suprimentos) ? p.suprimentos : [];
       const baixa = tBaixa(sup);
       return `
-        <div class="card ${p.online ? 'is-on' : 'is-off'}">
+        <div class="card ${p.online ? 'is-on' : ehUSB(p) ? '' : 'is-off'}">
           <div class="ch">
             <div>
               <div class="pname">${esc(p.nome)}</div>
-              <div class="pip">${esc(p.ip)}</div>
+              <div class="pip">${esc(enderecoImpressora(p))}</div>
               <div class="pmod">${esc(p.modelo || 'Canon')}</div>
               ${p.localizacao ? `<div class="ploc">📍 ${esc(p.localizacao)}</div>` : ''}
             </div>
-            <div class="sbadge ${p.online ? 'on' : 'off'}" aria-label="${p.online ? 'Conectado' : 'Sem sinal'}">${p.online ? '● CONECTADO' : '● SEM SINAL'}</div>
+            ${ehUSB(p)
+              ? '<div class="sbadge usb" aria-label="Conectada via USB">USB</div>'
+              : `<div class="sbadge ${p.online ? 'on' : 'off'}" aria-label="${p.online ? 'Conectado' : 'Sem sinal'}">${p.online ? '● CONECTADO' : '● SEM SINAL'}</div>`}
           </div>
           <div>
             ${sup.length ? sup.map(s => `
@@ -206,14 +208,14 @@
                   <span class="pct ${pClass(s.percentual)}">${s.percentual}%</span>
                 </div>
                 <div class="bar"><div class="fill ${corC(s.nome)}" style="width:${s.percentual}%" role="progressbar" aria-valuenow="${s.percentual}" aria-valuemin="0" aria-valuemax="100"></div></div>
-              </div>`).join('') : '<div class="nosnmp">Leitura SNMP indisponível</div>'}
+              </div>`).join('') : `<div class="nosnmp">${ehUSB(p) ? 'Conectada via USB — sem monitoramento' : 'Leitura SNMP indisponível'}</div>`}
           </div>
           ${baixa ? '<div class="alert-low" role="alert">Tinta crítica — verificar reposição</div>' : ''}
           <div class="cf">
             <span class="lck">Verificado: ${agora}</span>
             ${p.online
               ? `<a class="btr" href="http://${esc(p.ip)}" target="_blank" rel="noopener">Interface Remota</a>`
-              : '<span style="font-size:11px;color:var(--mt)">Sem conexão</span>'}
+              : `<span style="font-size:11px;color:var(--mt)">${ehUSB(p) ? 'USB' : 'Sem conexão'}</span>`}
           </div>
         </div>`;
     }).join('');

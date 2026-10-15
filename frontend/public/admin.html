@@ -158,10 +158,10 @@
 
       document.getElementById('stat-total').textContent   = dash.length;
       document.getElementById('stat-online').textContent  = dash.filter(p => p.online).length;
-      document.getElementById('stat-offline').textContent = dash.filter(p => !p.online).length;
+      document.getElementById('stat-offline').textContent = dash.filter(estaOffline).length;
       document.getElementById('stat-baixa').textContent   = dash.filter(p => p.online && tBaixa(p)).length;
 
-      const alertas   = dash.filter(p => !p.online || (p.online && tBaixa(p)) || p.aparelho_divergente);
+      const alertas   = dash.filter(p => estaOffline(p) || (p.online && tBaixa(p)) || p.aparelho_divergente);
       const alertasEl = document.getElementById('alertas-body');
       if (!alertas.length) {
         alertasEl.innerHTML = '<div class="alert-ok">✓ Tudo funcionando normalmente</div>';
@@ -205,7 +205,7 @@
           <div class="dev-row">
             <div class="dev-info">
               <strong>${esc(p.modelo || p.nome)}</strong>
-              <span>${esc(p.ip)}${p.localizacao ? ' · '+esc(p.localizacao) : ''}</span>
+              <span>${esc(enderecoImpressora(p))}${p.localizacao ? ' · '+esc(p.localizacao) : ''}</span>
             </div>
             <span style="font-size:11px;color:var(--mt)">${esc(p.fabricante||'')}</span>
           </div>`).join('');

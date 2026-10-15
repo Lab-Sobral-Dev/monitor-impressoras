@@ -71,10 +71,18 @@
     <div class="form-card-body">
       <form id="formAdd">
 
-        <label>IP / Endereço</label>
-        <div class="ip-row">
-          <input type="text" name="ip" id="ipInput" placeholder="192.168.1.50" autocomplete="off">
-          <button type="button" id="buscarBtn" class="btn-buscar">🔍 Buscar</button>
+        <label>Conexão</label>
+        <select name="conexao" id="conexaoSel">
+          <option value="rede">Rede (IP) — monitorada</option>
+          <option value="usb">USB — sem monitoramento</option>
+        </select>
+
+        <div id="blocoIp">
+          <label>IP / Endereço</label>
+          <div class="ip-row">
+            <input type="text" name="ip" id="ipInput" placeholder="192.168.1.50" autocomplete="off">
+            <button type="button" id="buscarBtn" class="btn-buscar">🔍 Buscar</button>
+          </div>
         </div>
 
         <div id="camposExtra" style="display:none;">
@@ -146,6 +154,17 @@
   const buscarBtn   = document.getElementById('buscarBtn');
   const camposExtra = document.getElementById('camposExtra');
   const avisoOffline = document.getElementById('avisoOffline');
+  const conexaoSel  = document.getElementById('conexaoSel');
+
+  // USB não tem IP para buscar: mostra direto os campos para preencher à mão
+  function atualizarConexao() {
+    const usb = conexaoSel.value === 'usb';
+    document.getElementById('blocoIp').style.display = usb ? 'none' : '';
+    camposExtra.style.display = usb ? 'block' : 'none';
+    avisoOffline.style.display = 'none';
+    if (usb) ipInput.value = '';
+  }
+  conexaoSel.addEventListener('change', atualizarConexao);
 
   function showMsg(text, type) {
     const el = document.getElementById('formMsg');
@@ -229,7 +248,7 @@
         return;
       }
       form.reset();
-      camposExtra.style.display = 'none';
+      atualizarConexao();
       showMsg('✓ Impressora cadastrada com sucesso!', 'ok');
       setTimeout(() => showMsg('', ''), 4000);
     } catch {

@@ -227,11 +227,11 @@
           .filter(s => s.percentual <= 15)
           .map(s => `${s.nome} ${s.percentual}%`)
           .join(' · ');
-        const setor = p.localizacao || p.ip;
+        const setor = p.localizacao || enderecoImpressora(p);
         return `<button class="alert-item" onclick="irParaCard(${p.id})">
           <div>
             <div class="alert-item-setor">📍 ${esc(setor)}</div>
-            <div class="alert-item-detalhe">${esc(p.nome)} · ${esc(p.ip)}</div>
+            <div class="alert-item-detalhe">${esc(p.nome)} · ${esc(enderecoImpressora(p))}</div>
           </div>
           <div class="alert-item-right">⚠️ ${esc(coresBaixas)}</div>
         </button>`;
@@ -246,7 +246,7 @@
     }
 
     const lista = filtroAtivo === 'online'  ? dadosCache.filter(p =>  p.online)
-                : filtroAtivo === 'offline' ? dadosCache.filter(p => !p.online)
+                : filtroAtivo === 'offline' ? dadosCache.filter(estaOffline)
                 : dadosCache;
 
     if (!lista.length) {
@@ -262,11 +262,13 @@
           <div class="ctop">
             <div>
               <div class="pname">${esc(p.nome)}</div>
-              <div class="pip">${esc(p.ip)}</div>
+              <div class="pip">${esc(enderecoImpressora(p))}</div>
               <div class="pmod">${esc(p.modelo || 'Canon')}</div>
               ${p.localizacao ? `<div class="ploc">📍 ${esc(p.localizacao)}</div>` : ''}
             </div>
-            <div class="sbadge ${p.online ? 'on' : 'off'}" aria-label="${p.online ? 'Online' : 'Offline'}">${p.online ? '● ONLINE' : '● OFFLINE'}</div>
+            ${ehUSB(p)
+              ? '<div class="sbadge usb" aria-label="Conectada via USB">USB</div>'
+              : `<div class="sbadge ${p.online ? 'on' : 'off'}" aria-label="${p.online ? 'Online' : 'Offline'}">${p.online ? '● ONLINE' : '● OFFLINE'}</div>`}
           </div>
           <div class="inks">
             ${sup.length ? sup.map(s => {
@@ -281,7 +283,7 @@
                   </div>
                   <div class="bar"><div class="fill ${c} ${low ? 'low' : ''}" style="width:${s.percentual}%" role="progressbar" aria-valuenow="${s.percentual}" aria-valuemin="0" aria-valuemax="100"></div></div>
                 </div>`;
-            }).join('') : `<div class="nosnmp">${p.online ? 'A impressora não informa o nível de tinta/toner' : 'Impressora offline — sem dados SNMP'}</div>`}
+            }).join('') : `<div class="nosnmp">${ehUSB(p) ? 'Conectada via USB — sem monitoramento' : p.online ? 'A impressora não informa o nível de tinta/toner' : 'Impressora offline — sem dados SNMP'}</div>`}
           </div>
           <div class="cfoot">
             <span class="lck">Verificado: ${agora}</span>

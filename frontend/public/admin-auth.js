@@ -17,6 +17,20 @@
   });
 })();
 
+// Impressora conectada via USB: sem IP e sem monitoramento pela rede.
+// Não conta como online nem como offline.
+function ehUSB(p) {
+  return p?.conexao === 'usb';
+}
+
+function estaOffline(p) {
+  return !p.online && !ehUSB(p);
+}
+
+function enderecoImpressora(p) {
+  return ehUSB(p) ? 'USB' : (p.ip || '');
+}
+
 function getToken() {
   try { return JSON.parse(sessionStorage.getItem('ic_token') || 'null'); } catch { return null; }
 }
