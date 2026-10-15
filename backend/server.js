@@ -104,7 +104,8 @@ async function refreshDashCache(rows) {
             return {
                 ...imp, material: imp.material || 'Toner', tipo: imp.tipo || 'Colorido', ...snmpData,
                 aparelho_divergente: serieDivergente(imp.numero_serie, snmpData.serie_detectada),
-                leitura_suspeita: leituraSuspeitaAtual(imp.id, snmpData)
+                leitura_suspeita: leituraSuspeitaAtual(imp.id, snmpData),
+                previsao_dias: previsaoAtual(imp.id, snmpData)
             };
         }));
         dashCache   = resultados;
@@ -930,6 +931,7 @@ async function atualizarLeiturasParadas() {
         const emMs = r => ({ ...r, em: Date.parse(r.em) });
         const impressoras = await consultarTodos("SELECT id FROM impressoras WHERE conexao <> 'usb'");
         const resultado = new Map();
+        const novasPrevisoes = new Map();
         for (const { id } of impressoras) {
             const tinta = await consultarTodos(
                 'SELECT cor, percentual, coletado_em AS em FROM historico_tinta WHERE impressora_id = ? AND coletado_em >= ?', [id, limite]);
@@ -937,11 +939,76 @@ async function atualizarLeiturasParadas() {
                 'SELECT paginas_total AS total, coletado_em AS em FROM historico_paginas WHERE impressora_id = ? AND coletado_em >= ?', [id, limite]);
             const parada = detectarLeituraParada(tinta.map(emMs), paginas.map(emMs));
             if (parada) resultado.set(id, parada);
+            // Nível parado não serve para prever consumo
+            const previsao = parada ? {} : preverFimDosSuprimentos(tinta.map(emMs));
+            if (Object.keys(previsao).length) novasPrevisoes.set(id, previsao);
         }
         leiturasParadas = resultado;
+        previsoesSuprimento = novasPrevisoes;
     } catch (e) {
         console.error('Erro ao avaliar leituras paradas:', e.message);
     }
+}
+
+// ── Previsão de fim de tinta/toner ────────────────────────────────────────────
+// Consumo médio desde a última troca/recarga (nível subiu), por regressão
+// linear do percentual no tempo. Só prevê com pelo menos PREVISAO_MIN_DIAS de
+// dados e queda mínima, para não extrapolar ruído.
+const PREVISAO_JANELA_DIAS   = 90;
+const PREVISAO_MIN_DIAS      = 7;
+const PREVISAO_MIN_QUEDA     = 3;   // pontos percentuais
+const PREVISAO_SUBIDA_TROCA  = 5;   // subida maior que isso = cartucho trocado/recarregado
+const PREVISAO_MAX_DIAS      = 365;
+
+let previsoesSuprimento = new Map(); // impressora_id → { cor: dias restantes }
+
+// tinta: [{ cor, percentual, em (ms) }] → { Preto: 12, ... } (só cores com previsão confiável)
+function preverFimDosSuprimentos(tinta, agora = Date.now()) {
+    const previsao = {};
+    const inicioJanela = agora - PREVISAO_JANELA_DIAS * DIA_MS;
+    const porCor = new Map();
+    for (const t of tinta) {
+        if (t.em < inicioJanela || typeof t.percentual !== 'number') continue;
+        if (!porCor.has(t.cor)) porCor.set(t.cor, []);
+        porCor.get(t.cor).push(t);
+    }
+    for (const [cor, leituras] of porCor) {
+        leituras.sort((a, b) => a.em - b.em);
+        let inicio = 0;
+        for (let i = 1; i < leituras.length; i++) {
+            if (leituras[i].percentual > leituras[i - 1].percentual + PREVISAO_SUBIDA_TROCA) inicio = i;
+        }
+        const trecho = leituras.slice(inicio);
+        if (trecho.length < 2) continue;
+        const primeira = trecho[0];
+        const ultima = trecho[trecho.length - 1];
+        if (agora - ultima.em > 3 * DIA_MS) continue; // sem leitura recente, a previsão estaria velha
+        if ((ultima.em - primeira.em) / DIA_MS < PREVISAO_MIN_DIAS) continue;
+        if (primeira.percentual - ultima.percentual < PREVISAO_MIN_QUEDA || ultima.percentual <= 0) continue;
+
+        // Inclinação (pontos percentuais por dia) por mínimos quadrados
+        const n = trecho.length;
+        const xs = trecho.map(t => (t.em - primeira.em) / DIA_MS);
+        const ys = trecho.map(t => t.percentual);
+        const mx = xs.reduce((a, b) => a + b, 0) / n;
+        const my = ys.reduce((a, b) => a + b, 0) / n;
+        let num = 0, den = 0;
+        for (let i = 0; i < n; i++) { num += (xs[i] - mx) * (ys[i] - my); den += (xs[i] - mx) ** 2; }
+        const inclinacao = den ? num / den : 0;
+        if (inclinacao >= 0) continue;
+
+        const dias = Math.round(ultima.percentual / -inclinacao);
+        if (dias <= PREVISAO_MAX_DIAS) previsao[cor] = dias;
+    }
+    return previsao;
+}
+
+// Só vale enquanto o nível ao vivo é o mesmo da última coleta (ou menor)
+function previsaoAtual(impressoraId, snmpData) {
+    const previsao = previsoesSuprimento.get(impressoraId);
+    if (!previsao || !snmpData.online) return null;
+    const cores = (snmpData.suprimentos || []).filter(s => previsao[s.nome] !== undefined);
+    return cores.length ? Object.fromEntries(cores.map(s => [s.nome, previsao[s.nome]])) : null;
 }
 
 // Só vale se a leitura ao vivo continua exatamente nos níveis parados
@@ -1798,7 +1865,7 @@ app.use((err, req, res, next) => {
 });
 
 module.exports = { app, db, dbReady, estoqueTokens, parsePageLogLine, coletarImpressoes, interpretarSuprimentos, serieDivergente, verificarPresencaNaRede, interpretarConsumiveisHP, interpretarSuprimentosHPWeb,
-    detectarLeituraParada, atualizarLeiturasParadas, limparHistoricoAntigo, horasDoExpediente };
+    detectarLeituraParada, atualizarLeiturasParadas, limparHistoricoAntigo, horasDoExpediente, preverFimDosSuprimentos };
 
 // ── Inicialização e graceful shutdown (apenas quando executado diretamente) ────
 if (require.main === module) {

@@ -277,7 +277,7 @@
                 <div class="irow">
                   <div class="imeta">
                     <div class="iname"><div class="idot ${c}" aria-hidden="true"></div>${esc(s.nome)}</div>
-                    <span class="ipct ${cls}">${s.percentual}%</span>
+                    <span class="ipct ${cls}">${textoPrevisao(p, s.nome) ? `<small class="iprev">${textoPrevisao(p, s.nome)} · </small>` : ''}${s.percentual}%</span>
                   </div>
                   <div class="bar"><div class="fill ${c} ${low ? 'low' : ''}" style="width:${s.percentual}%" role="progressbar" aria-valuenow="${s.percentual}" aria-valuemin="0" aria-valuemax="100"></div></div>
                 </div>`;

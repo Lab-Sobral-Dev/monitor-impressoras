@@ -203,7 +203,7 @@
               <div class="srow">
                 <div class="smeta">
                   <span>${esc(s.nome)}</span>
-                  <span class="pct ${pClass(s.percentual)}">${s.percentual}%</span>
+                  <span class="pct ${pClass(s.percentual)}">${textoPrevisao(p, s.nome) ? `<small class="iprev">${textoPrevisao(p, s.nome)} · </small>` : ''}${s.percentual}%</span>
                 </div>
                 <div class="bar"><div class="fill ${corC(s.nome)}" style="width:${s.percentual}%" role="progressbar" aria-valuenow="${s.percentual}" aria-valuemin="0" aria-valuemax="100"></div></div>
               </div>`).join('') : `<div class="nosnmp">${esc(motivoSemDados(p))}</div>`}

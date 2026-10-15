@@ -161,7 +161,7 @@
       document.getElementById('stat-offline').textContent = dash.filter(estaOffline).length;
       document.getElementById('stat-baixa').textContent   = dash.filter(p => p.online && tBaixa(p)).length;
 
-      const alertas   = dash.filter(p => estaOffline(p) || semLeituraSNMP(p) || (p.online && tBaixa(p)) || p.aparelho_divergente || p.leitura_suspeita);
+      const alertas   = dash.filter(p => estaOffline(p) || semLeituraSNMP(p) || (p.online && tBaixa(p)) || p.aparelho_divergente || p.leitura_suspeita || previsoesProximas(p).length);
       const alertasEl = document.getElementById('alertas-body');
       if (!alertas.length) {
         alertasEl.innerHTML = '<div class="alert-ok">✓ Tudo funcionando normalmente</div>';
@@ -176,6 +176,10 @@
           if (p.leitura_suspeita) {
             const r = p.leitura_suspeita;
             motivos.push(`Leitura não confiável: nível parado há ${r.dias} dias com ${Number(r.paginas).toLocaleString('pt-BR')} páginas impressas`);
+          }
+          const acabando = previsoesProximas(p);
+          if (acabando.length) {
+            motivos.push('Previsão: ' + acabando.map(([cor, dias]) => `${cor} ${textoPrevisao(p, cor)}`).join(', '));
           }
           if (p.online && tBaixa(p)) {
             const cores = (p.suprimentos||[]).filter(s=>s.percentual<=15).map(s=>s.nome+' '+s.percentual+'%').join(', ');

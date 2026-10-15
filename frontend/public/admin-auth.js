@@ -79,6 +79,18 @@ function avisoLeituraSuspeita(p) {
          'Provavelmente tinta compatível/a granel ou chip que não informa o consumo — confira no painel da impressora.';
 }
 
+// Previsão de fim da cor (calculada pelo consumo desde a última troca)
+function textoPrevisao(p, cor) {
+  const dias = p.previsao_dias?.[cor];
+  if (dias === undefined || dias === null) return '';
+  return dias <= 1 ? 'acaba em ~1 dia' : `acaba em ~${dias} dias`;
+}
+
+// Cores que devem acabar em até `limite` dias: [['Preto', 5], ...]
+function previsoesProximas(p, limite = 7) {
+  return Object.entries(p.previsao_dias || {}).filter(([, dias]) => dias <= limite);
+}
+
 // Interface web só faz sentido quando há algo respondendo no IP
 function temInterfaceWeb(p) {
   const s = situacaoImpressora(p);
