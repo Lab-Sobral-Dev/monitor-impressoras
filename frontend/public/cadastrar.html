@@ -91,6 +91,7 @@
                 <option value="Epson">Epson</option>
                 <option value="Brother">Brother</option>
                 <option value="Kyocera">Kyocera</option>
+                <option value="Samsung">Samsung</option>
               </select>
             </div>
             <div>
@@ -104,6 +105,9 @@
 
           <label>Modelo</label>
           <input type="text" name="modelo" placeholder="Ex: imageCLASS MF654Cdw">
+
+          <label>Número de série</label>
+          <input type="text" name="numero_serie" maxlength="64" placeholder="Preenchido automaticamente pela busca">
 
           <label>Localização</label>
           <input type="text" name="localizacao" placeholder="Ex: 2º Andar - Sala 201">
@@ -180,6 +184,7 @@
       setSelect('material', data.material);
       setSelect('tipo',     data.tipo);
       document.querySelector('[name="modelo"]').value    = data.modelo     || '';
+      document.querySelector('[name="numero_serie"]').value = data.numero_serie || '';
       document.querySelector('[name="comunidade"]').value = data.comunidade || 'public';
 
       avisoOffline.style.display = data.online ? 'none' : 'block';

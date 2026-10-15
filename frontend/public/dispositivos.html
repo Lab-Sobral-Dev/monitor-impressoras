@@ -34,11 +34,13 @@
     <h4>✏️ Editar Impressora</h4>
     <input type="hidden" id="editId">
     <span class="modal-label">Fabricante</span>
-    <select id="editFabricante" class="modal-input"><option>Canon</option><option>HP</option><option>Epson</option><option>Brother</option><option>Kyocera</option></select>
+    <select id="editFabricante" class="modal-input"><option>Canon</option><option>HP</option><option>Epson</option><option>Brother</option><option>Kyocera</option><option>Samsung</option></select>
     <span class="modal-label">Modelo / Setor</span>
     <input type="text" id="editModelo" class="modal-input" placeholder="Ex: GX7010 - Financeiro">
     <span class="modal-label">IP / Endereço</span>
     <input type="text" id="editIp" class="modal-input" placeholder="192.168.1.50">
+    <span class="modal-label">Número de série</span>
+    <input type="text" id="editSerie" class="modal-input" maxlength="64" placeholder="Ex: KNDX03073">
     <span class="modal-label">Localização</span>
     <input type="text" id="editLocalizacao" class="modal-input" placeholder="Ex: 2º Andar - Sala 201">
     <div class="modal-actions">
@@ -110,9 +112,9 @@
   </div>
   <div class="table-wrap">
     <table>
-      <thead><tr><th>Fabricante</th><th>Modelo / Setor</th><th>IP</th><th>Localização</th><th>Ações</th></tr></thead>
+      <thead><tr><th>Fabricante</th><th>Modelo / Setor</th><th>IP</th><th>Nº de série</th><th>Localização</th><th>Ações</th></tr></thead>
       <tbody id="deviceBody">
-        <tr><td colspan="5" style="text-align:center;color:var(--mt);padding:24px">Carregando...</td></tr>
+        <tr><td colspan="6" style="text-align:center;color:var(--mt);padding:24px">Carregando...</td></tr>
       </tbody>
     </table>
   </div>
@@ -160,21 +162,21 @@
       renderizar(todosImps);
     } catch {
       document.getElementById('deviceBody').innerHTML =
-        '<tr><td colspan="5" style="text-align:center;color:var(--no);padding:24px">Erro ao carregar dados.</td></tr>';
+        '<tr><td colspan="6" style="text-align:center;color:var(--no);padding:24px">Erro ao carregar dados.</td></tr>';
     } finally { document.getElementById('loader').classList.remove('show'); }
   }
 
   function filtrar() {
     const q = document.getElementById('searchInput').value.toLowerCase();
     renderizar(todosImps.filter(p =>
-      (p.modelo+p.ip+(p.fabricante||'')+(p.localizacao||'')).toLowerCase().includes(q)
+      (p.modelo+p.ip+(p.fabricante||'')+(p.localizacao||'')+(p.numero_serie||'')).toLowerCase().includes(q)
     ));
   }
 
   function renderizar(lista) {
     const body = document.getElementById('deviceBody');
     if (!lista.length) {
-      body.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--mt);padding:24px">Nenhuma impressora encontrada.</td></tr>';
+      body.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--mt);padding:24px">Nenhuma impressora encontrada.</td></tr>';
       return;
     }
     body.innerHTML = lista.map(p => `
@@ -182,11 +184,12 @@
         <td><strong>${esc(p.fabricante||'---')}</strong></td>
         <td>${esc(p.modelo||'---')}</td>
         <td><code>${esc(p.ip||'---')}</code></td>
+        <td><code>${esc(p.numero_serie||'---')}</code></td>
         <td>${esc(p.localizacao||'---')}</td>
         <td style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
           <a class="btn-tinta" href="http://${esc(p.ip)}" target="_blank" rel="noopener">🔗 Interface</a>
           <button class="btn-print" data-id="${p.id}" data-nome="${esc(p.modelo||'Impressora')}" onclick="abrirImpressao(this)">▶ Imprimir</button>
-          <button class="btn-edit" data-id="${p.id}" data-fab="${esc(p.fabricante||'')}" data-mod="${esc(p.modelo||'')}" data-ip="${esc(p.ip||'')}" data-loc="${esc(p.localizacao||'')}" onclick="abrirEdicao(this)">✏️ Editar</button>
+          <button class="btn-edit" data-id="${p.id}" data-fab="${esc(p.fabricante||'')}" data-mod="${esc(p.modelo||'')}" data-ip="${esc(p.ip||'')}" data-serie="${esc(p.numero_serie||'')}" data-loc="${esc(p.localizacao||'')}" onclick="abrirEdicao(this)">✏️ Editar</button>
           <button class="btn-del" onclick="del(${p.id})">✕</button>
         </td>
       </tr>`).join('');
@@ -197,6 +200,7 @@
     document.getElementById('editFabricante').value  = btn.dataset.fab;
     document.getElementById('editModelo').value      = btn.dataset.mod;
     document.getElementById('editIp').value          = btn.dataset.ip;
+    document.getElementById('editSerie').value       = btn.dataset.serie;
     document.getElementById('editLocalizacao').value = btn.dataset.loc;
     document.getElementById('modalEdit').classList.add('open');
   }
@@ -207,11 +211,12 @@
     const modelo      = document.getElementById('editModelo').value.trim();
     const ip          = document.getElementById('editIp').value.trim();
     const localizacao = document.getElementById('editLocalizacao').value.trim();
+    const numero_serie = document.getElementById('editSerie').value.trim();
     if (!modelo) { showToast('Preencha o Modelo/Setor', true); return; }
     try {
       const res = await fetch(`/api/impressoras/${id}`, {
         method: 'PUT', headers: authHeaders(),
-        body: JSON.stringify({ nome: fabricante, modelo, ip, localizacao })
+        body: JSON.stringify({ nome: fabricante, modelo, ip, localizacao, numero_serie })
       });
       if (!res.ok) throw new Error();
       document.getElementById('modalEdit').classList.remove('open');

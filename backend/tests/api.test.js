@@ -264,6 +264,20 @@ describe('POST /api/impressoras', () => {
         expect(res.status).toBe(400);
         expect(res.body.erro).toMatch(/modelo/);
     });
+
+    it('deve gravar o número de série e devolvê-lo na listagem', async () => {
+        const res = await request(app).post('/api/impressoras').set(await authAdmin())
+            .send({ ...IMP_VALIDA, numero_serie: ' BRBSP970FP ' });
+        expect(res.status).toBe(201);
+        const lista = await request(app).get('/api/impressoras').set(await authAdmin());
+        expect(lista.body.find(p => p.ip === IMP_VALIDA.ip).numero_serie).toBe('BRBSP970FP');
+    });
+
+    it('deve retornar 400 quando número de série não é texto', async () => {
+        const res = await request(app).post('/api/impressoras').set(await authAdmin()).send({ ...IMP_VALIDA, numero_serie: 123 });
+        expect(res.status).toBe(400);
+        expect(res.body.erro).toMatch(/numero_serie/);
+    });
 });
 
 // ── PUT /api/impressoras/:id ──────────────────────────────────────────────────
@@ -280,10 +294,23 @@ describe('PUT /api/impressoras/:id', () => {
     });
 
     it('deve retornar 200 e preservar campos não enviados', async () => {
-        const id = await criarImpressora();
+        const id = await criarImpressora({ ...IMP_VALIDA, numero_serie: 'KNDX03073' });
         const res = await request(app).put(`/api/impressoras/${id}`).set(await authAdmin()).send({ localizacao: 'Recepção' });
         expect(res.status).toBe(200);
         expect(res.body.sucesso).toBe(true);
+        const lista = await request(app).get('/api/impressoras').set(await authAdmin());
+        expect(lista.body.find(p => p.id === id)).toMatchObject({ localizacao: 'Recepção', numero_serie: 'KNDX03073' });
+    });
+
+    it('deve trocar e limpar o número de série', async () => {
+        const id = await criarImpressora({ ...IMP_VALIDA, numero_serie: 'KNDX03073' });
+        await request(app).put(`/api/impressoras/${id}`).set(await authAdmin()).send({ numero_serie: 'XBJX038395' });
+        let lista = await request(app).get('/api/impressoras').set(await authAdmin());
+        expect(lista.body.find(p => p.id === id).numero_serie).toBe('XBJX038395');
+
+        await request(app).put(`/api/impressoras/${id}`).set(await authAdmin()).send({ numero_serie: '' });
+        lista = await request(app).get('/api/impressoras').set(await authAdmin());
+        expect(lista.body.find(p => p.id === id).numero_serie).toBeNull();
     });
 });
 

@@ -161,7 +161,7 @@
       document.getElementById('stat-offline').textContent = dash.filter(p => !p.online).length;
       document.getElementById('stat-baixa').textContent   = dash.filter(p => p.online && tBaixa(p)).length;
 
-      const alertas   = dash.filter(p => !p.online || (p.online && tBaixa(p)));
+      const alertas   = dash.filter(p => !p.online || (p.online && tBaixa(p)) || p.aparelho_divergente);
       const alertasEl = document.getElementById('alertas-body');
       if (!alertas.length) {
         alertasEl.innerHTML = '<div class="alert-ok">✓ Tudo funcionando normalmente</div>';
@@ -169,6 +169,9 @@
         alertasEl.innerHTML = alertas.map(p => {
           const motivos = [];
           if (!p.online) motivos.push('Sem sinal');
+          if (p.aparelho_divergente) {
+            motivos.push(`Aparelho diferente do cadastrado: no IP está ${p.modelo_detectado || 'outro aparelho'} (série ${p.serie_detectada}); o cadastro tem a série ${p.numero_serie}. Atualize em Dispositivos.`);
+          }
           if (p.online && tBaixa(p)) {
             const cores = (p.suprimentos||[]).filter(s=>s.percentual<=15).map(s=>s.nome+' '+s.percentual+'%').join(', ');
             motivos.push('Tinta crítica: ' + cores);

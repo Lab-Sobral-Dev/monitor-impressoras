@@ -33,6 +33,10 @@ function validarImpressora(body, obrigatorio = true) {
     if (obrigatorio || modelo !== undefined) {
         if (!modelo || typeof modelo !== 'string' || !modelo.trim()) erros.push('modelo é obrigatório');
     }
+    const { numero_serie } = body;
+    if (numero_serie !== undefined && numero_serie !== null && (typeof numero_serie !== 'string' || numero_serie.length > 64)) {
+        erros.push('numero_serie deve ser texto de até 64 caracteres');
+    }
     return erros;
 }
 
@@ -88,7 +92,10 @@ async function refreshDashCache(rows) {
     try {
         const resultados = await Promise.all(rows.map(async (imp) => {
             const snmpData = await obterDadosSNMP(imp.ip, imp.comunidade);
-            return { ...imp, material: imp.material || 'Toner', tipo: imp.tipo || 'Colorido', ...snmpData };
+            return {
+                ...imp, material: imp.material || 'Toner', tipo: imp.tipo || 'Colorido', ...snmpData,
+                aparelho_divergente: serieDivergente(imp.numero_serie, snmpData.serie_detectada)
+            };
         }));
         dashCache   = resultados;
         dashCacheAt = Date.now();
@@ -269,6 +276,7 @@ const dbReady = new Promise(resolve => {
         )`);
         db.run(`ALTER TABLE impressoras ADD COLUMN material TEXT`, () => {});
         db.run(`ALTER TABLE impressoras ADD COLUMN tipo TEXT`, () => {});
+        db.run(`ALTER TABLE impressoras ADD COLUMN numero_serie TEXT`, () => {});
         db.run(`UPDATE impressoras SET material = 'Toner' WHERE material IS NULL`);
         db.run(`UPDATE impressoras SET tipo = 'Colorido' WHERE tipo IS NULL`);
         db.run(`CREATE TABLE IF NOT EXISTS estoque (
@@ -494,25 +502,34 @@ function obterNiveisBrother(ip, comunidade) {
     });
 }
 
-// ── Leitura de suprimentos (Printer-MIB, RFC 3805) ────────────────────────────
-// Pergunta item a item da tabela prtMarkerSupplies (tipo, cor, máximo, nível)
-// e usa o tipo/cor que a própria impressora informa, em vez de supor pela
-// posição. Uma requisição por item: no SNMP v1 um único OID inexistente faz a
-// requisição inteira falhar (noSuchName) — pedir as 4 cores de uma vez fazia
-// impressoras monocromáticas aparecerem sempre offline.
-const OID_SUPRIMENTOS      = '1.3.6.1.2.1.43.11.1.1';   // prtMarkerSuppliesEntry
-const OID_CORANTES         = '1.3.6.1.2.1.43.12.1.1.4.1'; // prtMarkerColorantValue
-const TIPOS_TINTA_TONER    = new Set([3, 5, 6, 21]);     // toner, ink, inkCartridge, tonerCartridge
+// ── Consulta SNMP de impressora (Printer-MIB, RFC 3805) ───────────────────────
+// Lê identificação (descrição, modelo, nº de série) e a tabela prtMarkerSupplies
+// item a item (tipo, cor, máximo, nível), usando o tipo/cor que a própria
+// impressora informa em vez de supor pela posição. Uma requisição por item: no
+// SNMP v1 um único OID inexistente faz a requisição inteira falhar
+// (noSuchName) — pedir as 4 cores de uma vez fazia impressoras monocromáticas
+// aparecerem sempre offline.
+const OID_SYS_DESCR        = '1.3.6.1.2.1.1.1.0';
+const OID_MODELO           = '1.3.6.1.2.1.25.3.2.1.3.1';    // hrDeviceDescr
+const OID_NUMERO_SERIE     = '1.3.6.1.2.1.43.5.1.1.17.1';   // prtGeneralSerialNumber
+const OID_SUPRIMENTOS      = '1.3.6.1.2.1.43.11.1.1';       // prtMarkerSuppliesEntry
+const OID_CORANTES         = '1.3.6.1.2.1.43.12.1.1.4.1';   // prtMarkerColorantValue
+const TIPOS_TINTA          = new Set([5, 6]);               // ink, inkCartridge
+const TIPOS_TONER          = new Set([3, 21]);              // toner, tonerCartridge
 const NOMES_COR            = [['black', 'Preto'], ['cyan', 'Ciano'], ['magenta', 'Magenta'], ['yellow', 'Amarelo']];
 const ORDEM_CORES          = NOMES_COR.map(([, nome]) => nome);
 const MAX_ITENS_SUPRIMENTO = 12;
 
 function textoSNMP(valor) {
-    return Buffer.isBuffer(valor) ? valor.toString().replace(/\0/g, '').trim() : String(valor ?? '');
+    return Buffer.isBuffer(valor) ? valor.toString().replace(/\0/g, '').trim() : String(valor ?? '').trim();
 }
 
-function nomeDaCor(...textos) {
-    for (const t of textos) {
+function ehTintaOuToner(item) {
+    return TIPOS_TINTA.has(item.tipo) || TIPOS_TONER.has(item.tipo);
+}
+
+function corDoItem(item, corantes) {
+    for (const t of [corantes[item.corante] || '', item.descricao || '']) {
         const achado = NOMES_COR.find(([en]) => String(t).toLowerCase().includes(en));
         if (achado) return achado[1];
     }
@@ -533,8 +550,8 @@ function calcularPercentual(max, nivel) {
 function interpretarSuprimentos(itens, corantes = {}) {
     const porCor = new Map();
     for (const item of itens) {
-        if (!TIPOS_TINTA_TONER.has(item.tipo)) continue;
-        const nome = nomeDaCor(corantes[item.corante] || '', item.descricao || '');
+        if (!ehTintaOuToner(item)) continue;
+        const nome = corDoItem(item, corantes);
         if (!nome || porCor.has(nome)) continue;
         const percentual = calcularPercentual(item.max, item.nivel);
         if (percentual !== null) porCor.set(nome, { nome, percentual });
@@ -542,24 +559,49 @@ function interpretarSuprimentos(itens, corantes = {}) {
     return ORDEM_CORES.filter(c => porCor.has(c)).map(c => porCor.get(c));
 }
 
+// Cores de tinta/toner que a impressora tem, mesmo sem nível legível
+function coresDosSuprimentos(itens, corantes = {}) {
+    return [...new Set(itens.filter(ehTintaOuToner).map(it => corDoItem(it, corantes)).filter(Boolean))];
+}
+
+function normalizarSerie(serie) {
+    return String(serie ?? '').trim().toUpperCase();
+}
+
+// Aparelho no IP não é o cadastrado: os dois números de série existem e diferem
+function serieDivergente(serieCadastrada, serieDetectada) {
+    const cadastrada = normalizarSerie(serieCadastrada);
+    const detectada  = normalizarSerie(serieDetectada);
+    return Boolean(cadastrada && detectada && cadastrada !== detectada);
+}
+
 function snmpGet(session, oids) {
     return new Promise(resolve => session.get(oids, (erro, varbinds) => resolve({ erro, varbinds })));
 }
 
-async function lerItensSuprimento(ip, comunidade) {
-    const session = snmp.createSession(ip, comunidade || 'public', { timeout: 1000, retries: 1 });
+async function lerTextoSNMP(session, oid) {
+    const { erro, varbinds } = await snmpGet(session, [oid]);
+    if (erro || !varbinds?.[0] || snmp.isVarbindError(varbinds[0])) return '';
+    return textoSNMP(varbinds[0].value);
+}
+
+async function consultarImpressora(ip, comunidade, { timeout = 1000 } = {}) {
+    const offline = { online: false, sysDescr: '', modelo: '', serie: '', itens: [], corantes: {} };
+    const session = snmp.createSession(ip, comunidade || 'public', { timeout, retries: 1 });
     try {
+        // Qualquer resposta — inclusive noSuchName — significa que o aparelho está na rede.
+        const inicial = await snmpGet(session, [OID_SYS_DESCR]);
+        if (inicial.erro && inicial.erro.name !== 'RequestFailedError') return offline;
+        const sysDescr = !inicial.erro && !snmp.isVarbindError(inicial.varbinds[0]) ? textoSNMP(inicial.varbinds[0].value) : '';
+        const modelo   = await lerTextoSNMP(session, OID_MODELO);
+        const serie    = await lerTextoSNMP(session, OID_NUMERO_SERIE);
+
         const itens = [];
         for (let i = 1; i <= MAX_ITENS_SUPRIMENTO; i++) {
             const col = c => `${OID_SUPRIMENTOS}.${c}.1.${i}`;
             const { erro, varbinds } = await snmpGet(session, [col(5), col(3), col(6), col(8), col(9)]);
-            if (erro) {
-                // noSuchName = a tabela acabou (ou não existe): a impressora respondeu.
-                if (erro.name === 'RequestFailedError') break;
-                if (i === 1) return { online: false, itens: [], corantes: {} };
-                break;
-            }
-            if (varbinds.some(vb => snmp.isVarbindError(vb))) break;
+            // noSuchName = a tabela acabou (ou não existe)
+            if (erro || varbinds.some(vb => snmp.isVarbindError(vb))) break;
             const [tipo, corante, descricao, max, nivel] = varbinds.map(vb => vb.value);
             itens.push({ tipo, corante, descricao: textoSNMP(descricao), max, nivel });
         }
@@ -572,7 +614,7 @@ async function lerItensSuprimento(ip, comunidade) {
                 if (!snmp.isVarbindError(vb)) corantes[indices[k]] = textoSNMP(vb.value);
             });
         }
-        return { online: true, itens, corantes };
+        return { online: true, sysDescr, modelo, serie, itens, corantes };
     } finally {
         session.close();
     }
@@ -580,15 +622,20 @@ async function lerItensSuprimento(ip, comunidade) {
 
 async function obterDadosSNMP(ip, comunidade) {
     try {
-        const { online, itens, corantes } = await lerItensSuprimento(ip, comunidade);
-        if (!online) return { online: false, suprimentos: [] };
-        const suprimentos = interpretarSuprimentos(itens, corantes);
+        const c = await consultarImpressora(ip, comunidade);
+        if (!c.online) return { online: false, suprimentos: [], serie_detectada: null, modelo_detectado: null };
+        let suprimentos = interpretarSuprimentos(c.itens, c.corantes);
         // Nenhum nível legível pela MIB padrão — tentar OID proprietário Brother
-        if (suprimentos.length === 0) return { online: true, suprimentos: await obterNiveisBrother(ip, comunidade) };
-        return { online: true, suprimentos };
+        if (suprimentos.length === 0) suprimentos = await obterNiveisBrother(ip, comunidade);
+        return {
+            online: true,
+            suprimentos,
+            serie_detectada: c.serie || null,
+            modelo_detectado: c.modelo || c.sysDescr || null
+        };
     } catch (e) {
         console.error(`Erro SNMP em ${ip}:`, e.message);
-        return { online: false, suprimentos: [] };
+        return { online: false, suprimentos: [], serie_detectada: null, modelo_detectado: null };
     }
 }
 
@@ -605,7 +652,7 @@ function obterContadorPaginas(ip, comunidade) {
 }
 
 async function coletarHistorico() {
-    db.all('SELECT id, ip, comunidade FROM impressoras', [], async (err, rows) => {
+    db.all('SELECT id, ip, comunidade, numero_serie FROM impressoras', [], async (err, rows) => {
         if (err || !rows.length) return;
         const agora = new Date().toISOString();
         for (const imp of rows) {
@@ -615,6 +662,10 @@ async function coletarHistorico() {
             ]);
             db.run('INSERT INTO historico_status (impressora_id, online, registrado_em) VALUES (?, ?, ?)',
                 [imp.id, snmpData.online ? 1 : 0, agora]);
+            // Primeira leitura grava o nº de série; depois disso, série diferente = aparelho trocado
+            if (!normalizarSerie(imp.numero_serie) && snmpData.serie_detectada) {
+                db.run('UPDATE impressoras SET numero_serie = ? WHERE id = ?', [snmpData.serie_detectada, imp.id]);
+            }
             for (const s of (snmpData.suprimentos || [])) {
                 db.run('INSERT INTO historico_tinta (impressora_id, cor, percentual, coletado_em) VALUES (?, ?, ?, ?)',
                     [imp.id, s.nome, s.percentual, agora]);
@@ -735,51 +786,26 @@ async function coletarImpressoes() {
 }
 
 // ── Descoberta de dispositivo via SNMP ────────────────────────────────────────
-const FABRICANTES = ['Canon', 'HP', 'Epson', 'Brother', 'Kyocera'];
+const FABRICANTES = ['Canon', 'HP', 'Epson', 'Brother', 'Kyocera', 'Samsung'];
 
-function descobrirImpressora(ip) {
-    return new Promise((resolve) => {
-        const session = snmp.createSession(ip, 'public', { timeout: 2000, retries: 0 });
-        const oids = [
-            '1.3.6.1.2.1.1.1.0',            // sysDescr
-            '1.3.6.1.2.1.25.3.2.1.3.1',     // hrDeviceDescr
-            '1.3.6.1.2.1.43.11.1.1.8.1.2',  // C max
-            '1.3.6.1.2.1.43.11.1.1.9.1.2',  // C cur
-            '1.3.6.1.2.1.43.11.1.1.8.1.3',  // M max
-            '1.3.6.1.2.1.43.11.1.1.9.1.3',  // M cur
-            '1.3.6.1.2.1.43.11.1.1.8.1.4',  // Y max
-            '1.3.6.1.2.1.43.11.1.1.9.1.4',  // Y cur
-        ];
-        session.get(oids, (error, varbinds) => {
-            session.close();
-            if (error) {
-                return resolve({ online: false, fabricante: '', modelo: '', tipo: 'Colorido', material: 'Toner', comunidade: 'public' });
-            }
-            const toStr = (vb) => {
-                if (!vb || snmp.isVarbindError(vb)) return '';
-                return Buffer.isBuffer(vb.value) ? vb.value.toString('utf8') : String(vb.value ?? '');
-            };
-            const sysDescr      = toStr(varbinds[0]);
-            const hrDeviceDescr = toStr(varbinds[1]);
-            const texto         = (sysDescr + ' ' + hrDeviceDescr).toLowerCase();
-
-            const fabricante = FABRICANTES.find(f => texto.includes(f.toLowerCase())) || '';
-            const modelo     = hrDeviceDescr.trim() || sysDescr.trim();
-            const cMax = Number(varbinds[2]?.value) || 0;
-            const mMax = Number(varbinds[4]?.value) || 0;
-            const yMax = Number(varbinds[6]?.value) || 0;
-            const tipo     = (cMax > 0 || mMax > 0 || yMax > 0) ? 'Colorido' : 'Mono';
-            const material = /laser|toner/i.test(sysDescr + hrDeviceDescr) ? 'Toner' : 'Tinta';
-
-            resolve({ online: true, fabricante, modelo, tipo, material, comunidade: 'public' });
-        });
-    });
+async function descobrirImpressora(ip) {
+    const c = await consultarImpressora(ip, 'public', { timeout: 2000 });
+    if (!c.online) {
+        return { online: false, fabricante: '', modelo: '', numero_serie: '', tipo: 'Colorido', material: 'Toner', comunidade: 'public' };
+    }
+    const texto      = `${c.sysDescr} ${c.modelo}`;
+    const fabricante = FABRICANTES.find(f => texto.toLowerCase().includes(f.toLowerCase())) || '';
+    const tipo       = coresDosSuprimentos(c.itens, c.corantes).some(cor => cor !== 'Preto') ? 'Colorido' : 'Mono';
+    const usaTinta   = c.itens.some(it => TIPOS_TINTA.has(it.tipo));
+    const usaToner   = c.itens.some(it => TIPOS_TONER.has(it.tipo));
+    const material   = usaTinta ? 'Tinta' : usaToner ? 'Toner' : (/laser|toner/i.test(texto) ? 'Toner' : 'Tinta');
+    return { online: true, fabricante, modelo: c.modelo || c.sysDescr, numero_serie: c.serie, tipo, material, comunidade: 'public' };
 }
 
 // ── Rotas ─────────────────────────────────────────────────────────────────────
 
 app.get('/api/dashboard', exigirAlgumaPermissao(['dashboard', 'estoque']), (req, res, next) => {
-    db.all('SELECT id, nome, ip, modelo, localizacao, comunidade, tipo, material FROM impressoras', [], async (err, rows) => {
+    db.all('SELECT id, nome, ip, modelo, localizacao, comunidade, tipo, material, numero_serie FROM impressoras', [], async (err, rows) => {
         if (err) { console.error(err); return next(err); }
 
         const cacheValido = dashCache && Date.now() - dashCacheAt < DASH_TTL;
@@ -807,7 +833,7 @@ app.get('/api/dashboard', exigirAlgumaPermissao(['dashboard', 'estoque']), (req,
 });
 
 app.get('/api/impressoras', exigirAlgumaPermissao(['impressoras', 'estoque', 'relatorios']), (req, res, next) => {
-    db.all('SELECT id, nome AS fabricante, ip, modelo, localizacao, comunidade, tipo, material FROM impressoras ORDER BY id ASC', [], (err, rows) => {
+    db.all('SELECT id, nome AS fabricante, ip, modelo, localizacao, comunidade, tipo, material, numero_serie FROM impressoras ORDER BY id ASC', [], (err, rows) => {
         if (err) return next(err);
         res.json(rows);
     });
@@ -817,10 +843,10 @@ app.post('/api/impressoras', exigirPermissao('impressoras'), (req, res, next) =>
     const erros = validarImpressora(req.body, true);
     if (erros.length) return res.status(400).json({ erro: erros.join('; ') });
 
-    const { nome, ip, modelo, localizacao, comunidade, tipo, material } = req.body;
+    const { nome, ip, modelo, localizacao, comunidade, tipo, material, numero_serie } = req.body;
     db.run(
-        `INSERT INTO impressoras (nome, ip, modelo, localizacao, comunidade, tipo, material) VALUES (?,?,?,?,?,?,?)`,
-        [nome.trim(), ip.trim(), modelo.trim(), localizacao, comunidade || 'public', tipo || 'Colorido', material || 'Toner'],
+        `INSERT INTO impressoras (nome, ip, modelo, localizacao, comunidade, tipo, material, numero_serie) VALUES (?,?,?,?,?,?,?,?)`,
+        [nome.trim(), ip.trim(), modelo.trim(), localizacao, comunidade || 'public', tipo || 'Colorido', material || 'Toner', numero_serie?.trim() || null],
         (err) => {
             if (err) { console.error(err); return next(err); }
             invalidarCacheDash();
@@ -833,12 +859,12 @@ app.put('/api/impressoras/:id', exigirPermissao('impressoras'), (req, res, next)
     const erros = validarImpressora(req.body, false);
     if (erros.length) return res.status(400).json({ erro: erros.join('; ') });
 
-    const { nome, modelo, ip, localizacao, comunidade, tipo, material } = req.body;
+    const { nome, modelo, ip, localizacao, comunidade, tipo, material, numero_serie } = req.body;
     db.get('SELECT * FROM impressoras WHERE id = ?', [req.params.id], (err, existing) => {
         if (err) { console.error(err); return next(err); }
         if (!existing) return res.status(404).json({ erro: 'Impressora não encontrada' });
         db.run(
-            `UPDATE impressoras SET nome = ?, modelo = ?, ip = ?, localizacao = ?, comunidade = ?, tipo = ?, material = ? WHERE id = ?`,
+            `UPDATE impressoras SET nome = ?, modelo = ?, ip = ?, localizacao = ?, comunidade = ?, tipo = ?, material = ?, numero_serie = ? WHERE id = ?`,
             [
                 (nome        ?? existing.nome)?.trim?.()    ?? existing.nome,
                 (modelo      ?? existing.modelo)?.trim?.()  ?? existing.modelo,
@@ -847,6 +873,7 @@ app.put('/api/impressoras/:id', exigirPermissao('impressoras'), (req, res, next)
                 comunidade   ?? existing.comunidade,
                 tipo         ?? existing.tipo,
                 material     ?? existing.material,
+                numero_serie === undefined ? existing.numero_serie : (numero_serie?.trim() || null),
                 req.params.id
             ],
             function (err) {
@@ -1233,7 +1260,7 @@ app.get('/api/descobrir', limiterDescoberta, async (req, res, next) => {
 // ── Relatórios ────────────────────────────────────────────────────────────────
 
 app.get('/api/relatorios/impressoras', exigirPermissao('relatorios'), (req, res, next) => {
-    db.all('SELECT id, nome, ip, modelo, localizacao, tipo, material, comunidade FROM impressoras ORDER BY nome ASC', [], async (err, rows) => {
+    db.all('SELECT id, nome, ip, modelo, localizacao, tipo, material, comunidade, numero_serie FROM impressoras ORDER BY nome ASC', [], async (err, rows) => {
         if (err) return next(err);
         const resultados = await Promise.all(rows.map(async (imp) => {
             const [snmpData, paginas] = await Promise.all([
@@ -1465,7 +1492,7 @@ app.use((err, req, res, next) => {
     res.status(500).json({ erro: 'Erro interno do servidor' });
 });
 
-module.exports = { app, db, dbReady, estoqueTokens, parsePageLogLine, coletarImpressoes, interpretarSuprimentos };
+module.exports = { app, db, dbReady, estoqueTokens, parsePageLogLine, coletarImpressoes, interpretarSuprimentos, serieDivergente };
 
 // ── Inicialização e graceful shutdown (apenas quando executado diretamente) ────
 if (require.main === module) {

@@ -434,6 +434,7 @@
       html += '<div class="ficha-item"><div class="ficha-label">Fabricante</div><div class="ficha-val">' + escHTML(imp.nome) + '</div></div>';
       html += '<div class="ficha-item"><div class="ficha-label">Modelo</div><div class="ficha-val" style="font-size:14px">' + escHTML(imp.modelo||'&mdash;') + '</div></div>';
       html += '<div class="ficha-item"><div class="ficha-label">IP</div><div class="ficha-val" style="font-size:14px;color:var(--accent)">' + escHTML(imp.ip) + '</div></div>';
+      html += '<div class="ficha-item"><div class="ficha-label">N&ordm; de s&eacute;rie</div><div class="ficha-val" style="font-size:14px">' + (imp.numero_serie ? escHTML(imp.numero_serie) : '&mdash;') + '</div></div>';
       html += '<div class="ficha-item"><div class="ficha-label">Localiza&ccedil;&atilde;o</div><div class="ficha-val" style="font-size:14px">' + escHTML(imp.localizacao||'&mdash;') + '</div></div>';
       html += '<div class="ficha-item"><div class="ficha-label">Tipo</div><div class="ficha-val" style="font-size:14px">' + escHTML(imp.tipo||'&mdash;') + '</div></div>';
       html += '<div class="ficha-item"><div class="ficha-label">Material</div><div class="ficha-val" style="font-size:14px">' + escHTML(imp.material||'&mdash;') + '</div></div>';
@@ -1056,6 +1057,7 @@
       '<div><span>Fabricante</span><strong>' + escHTML(imp.nome || '-') + '</strong></div>' +
       '<div><span>Modelo</span><strong>' + escHTML(imp.modelo || '-') + '</strong></div>' +
       '<div><span>IP</span><strong>' + escHTML(imp.ip || '-') + '</strong></div>' +
+      '<div><span>Nº de série</span><strong>' + escHTML(imp.numero_serie || '-') + '</strong></div>' +
       '<div><span>Localização</span><strong>' + escHTML(imp.localizacao || '-') + '</strong></div>' +
       '</div>';
     const sups = Array.isArray(imp.suprimentos) ? imp.suprimentos : [];

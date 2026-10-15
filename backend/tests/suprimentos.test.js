@@ -3,7 +3,7 @@
 
 // Casos montados com o que as impressoras reais do parque respondem via SNMP
 // (tabela prtMarkerSupplies: tipo, índice do corante, descrição, máximo, nível).
-const { interpretarSuprimentos, db, dbReady } = require('../server');
+const { interpretarSuprimentos, serieDivergente, db, dbReady } = require('../server');
 
 afterAll(() => dbReady.then(() => new Promise(resolve => db.close(resolve))));
 
@@ -74,5 +74,21 @@ describe('interpretarSuprimentos', () => {
     it('máximo -2 com nível em escala 0-255 é convertido para percentual', () => {
         const itens = [{ tipo: 5, corante: 1, descricao: 'Black', max: -2, nivel: 255 }];
         expect(interpretarSuprimentos(itens, CORANTES_PADRAO)).toEqual([{ nome: 'Preto', percentual: 100 }]);
+    });
+});
+
+describe('serieDivergente', () => {
+    it('acusa aparelho trocado quando as séries diferem', () => {
+        expect(serieDivergente('KNDX03073', 'XBJX038395')).toBe(true);
+    });
+
+    it('ignora diferença de maiúsculas e espaços', () => {
+        expect(serieDivergente(' kndx03073 ', 'KNDX03073')).toBe(false);
+    });
+
+    it('não acusa nada sem série cadastrada ou sem série lida', () => {
+        expect(serieDivergente(null, 'KNDX03073')).toBe(false);
+        expect(serieDivergente('KNDX03073', null)).toBe(false);
+        expect(serieDivergente('', '')).toBe(false);
     });
 });
