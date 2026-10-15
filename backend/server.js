@@ -15,7 +15,7 @@ const app = express();
 // Atrás de 1 proxy reverso (Apache no .214, HTTP e HTTPS) — sem isso o
 // express-rate-limit rejeita o X-Forwarded-For que o Apache já envia
 // (ERR_ERL_UNEXPECTED_X_FORWARDED_FOR), quebrando as rotas com rate limit
-// (ex.: /api/auth/sso, /api/auth/login).
+// (ex.: /api/auth/sso).
 app.set('trust proxy', 1);
 
 // ── Validação de IP e campos de impressora ────────────────────────────────────
@@ -97,13 +97,10 @@ async function refreshDashCache(rows) {
     }
 }
 
-// ── Credenciais de admin ──────────────────────────────────────────────────────
-const ADMIN_USER = process.env.ADMIN_USER || 'admin';
-let   ADMIN_SENHA = process.env.ADMIN_SENHA;
-if (!ADMIN_SENHA) {
-    ADMIN_SENHA = crypto.randomBytes(8).toString('hex');
-    console.warn('⚠️  ADMIN_SENHA não definida. Senha temporária gerada:', ADMIN_SENHA);
-}
+// ── Sessões de admin ──────────────────────────────────────────────────────────
+// Não há login por usuário/senha: a única porta de entrada é o SSO do Gestão
+// (/api/auth/sso), que emite o token de sessão abaixo.
+const ADMIN_USER = 'admin';
 
 const adminTokens = new Map();
 const PERMISSOES_PADRAO = ['dashboard', 'impressoras', 'estoque', 'relatorios', 'usuarios', 'imprimir'];
@@ -177,22 +174,6 @@ setInterval(() => {
     }
 }, 60_000).unref();
 
-// Tokens temporários para troca de senha obrigatória (TTL 15 min)
-const tempTrocarSenhaTokens = new Map(); // token → { userId, exp }
-
-function gerarTempToken(userId) {
-    const token = crypto.randomBytes(24).toString('hex');
-    tempTrocarSenhaTokens.set(token, { userId, exp: Date.now() + 15 * 60 * 1000 });
-    return token;
-}
-
-setInterval(() => {
-    const now = Date.now();
-    for (const [token, { exp }] of tempTrocarSenhaTokens) {
-        if (now > exp) tempTrocarSenhaTokens.delete(token);
-    }
-}, 60_000).unref();
-
 // ── Hashing de senhas (scrypt) ────────────────────────────────────────────────
 function hashSenha(senha) {
     return new Promise((resolve, reject) => {
@@ -200,16 +181,6 @@ function hashSenha(senha) {
         crypto.scrypt(senha, salt, 64, (err, hash) => {
             if (err) return reject(err);
             resolve(salt + ':' + hash.toString('hex'));
-        });
-    });
-}
-
-function verificarSenha(senha, armazenado) {
-    return new Promise((resolve, reject) => {
-        const [salt, key] = armazenado.split(':');
-        crypto.scrypt(senha, salt, 64, (err, derived) => {
-            if (err) return reject(err);
-            resolve(derived.toString('hex') === key);
         });
     });
 }
@@ -385,21 +356,6 @@ const dbReady = new Promise(resolve => {
         db.run(`ALTER TABLE impressoes_cursor ADD COLUMN last_line_jobpages INTEGER NOT NULL DEFAULT 0`, () => {});
         db.run(`INSERT OR IGNORE INTO impressoes_cursor (id, last_line, last_line_jobpages) VALUES (1, 0, 0)`);
         db.run('SELECT 1', resolve);
-    });
-});
-
-// Seed: cria admin inicial se não existir nenhum usuário
-dbReady.then(() => {
-    db.get('SELECT COUNT(*) AS total FROM usuarios', [], async (err, row) => {
-        if (err || row.total > 0) return;
-        try {
-            const hash = await hashSenha(ADMIN_SENHA);
-            db.run(
-                `INSERT INTO usuarios (nome, usuario, senha_hash, perfil, permissoes) VALUES (?, ?, ?, 'admin', ?)`,
-                ['Administrador', ADMIN_USER, hash, JSON.stringify(PERMISSOES_PADRAO)],
-                (e) => { if (!e) console.log(`✅ Usuário admin criado: ${ADMIN_USER}`); }
-            );
-        } catch (e) { console.error('Erro ao criar admin:', e); }
     });
 });
 
@@ -921,63 +877,7 @@ app.get('/api/auth/sso', limiterAuth, async (req, res) => {
     }
 });
 
-// ── Autenticação de admin ─────────────────────────────────────────────────────
-app.post('/api/auth/login', limiterAuth, (req, res) => {
-    const { usuario, senha } = req.body;
-    if (!usuario || !senha) return res.status(400).json({ ok: false, erro: 'Preencha usuário e senha.' });
-
-    db.get('SELECT * FROM usuarios WHERE usuario = ? AND ativo = 1', [usuario.trim()], async (err, user) => {
-        if (err || !user) {
-            return setTimeout(() => res.status(401).json({ ok: false, erro: 'Usuário ou senha incorretos.' }), 800);
-        }
-        try {
-            const ok = await verificarSenha(senha, user.senha_hash);
-            if (!ok) return setTimeout(() => res.status(401).json({ ok: false, erro: 'Usuário ou senha incorretos.' }), 800);
-            db.run('UPDATE usuarios SET ultimo_login = datetime(\'now\') WHERE id = ?', [user.id]);
-            if (user.trocar_senha) {
-                return res.json({ ok: true, trocar_senha: true, temp_token: gerarTempToken(user.id), usuario: user.usuario, nome: user.nome });
-            }
-            const permissoes = user.perfil === 'admin' ? PERMISSOES_PADRAO : normalizarPermissoes(user.permissoes);
-            res.json({
-                ok: true,
-                token: gerarTokenAdmin(user),
-                usuario: user.usuario,
-                nome: user.nome,
-                perfil: user.perfil || 'admin',
-                permissoes
-            });
-        } catch {
-            res.status(500).json({ ok: false, erro: 'Erro interno.' });
-        }
-    });
-});
-
-app.post('/api/auth/trocar-senha', async (req, res) => {
-    const { temp_token, nova_senha } = req.body;
-    if (!temp_token || !nova_senha) return res.status(400).json({ ok: false, erro: 'Dados incompletos.' });
-    if (nova_senha.length < 6) return res.status(400).json({ ok: false, erro: 'Senha deve ter ao menos 6 caracteres.' });
-
-    const entry = tempTrocarSenhaTokens.get(temp_token);
-    if (!entry || Date.now() > entry.exp) return res.status(401).json({ ok: false, erro: 'Sessão expirada. Faça login novamente.' });
-
-    try {
-        const hash = await hashSenha(nova_senha);
-        db.run(
-            `UPDATE usuarios SET senha_hash = ?, trocar_senha = 0 WHERE id = ?`,
-            [hash, entry.userId],
-            function(err) {
-                if (err || this.changes === 0) return res.status(500).json({ ok: false, erro: 'Erro ao atualizar senha.' });
-                tempTrocarSenhaTokens.delete(temp_token);
-                db.get('SELECT id, usuario, nome, perfil, permissoes FROM usuarios WHERE id = ?', [entry.userId], (e, user) => {
-                    if (e || !user) return res.status(500).json({ ok: false, erro: 'Erro interno.' });
-                    const permissoes = user.perfil === 'admin' ? PERMISSOES_PADRAO : normalizarPermissoes(user.permissoes);
-                    res.json({ ok: true, token: gerarTokenAdmin(user), usuario: user.usuario, nome: user.nome, perfil: user.perfil || 'admin', permissoes });
-                });
-            }
-        );
-    } catch { res.status(500).json({ ok: false, erro: 'Erro interno.' }); }
-});
-
+// ── Sessão de admin ───────────────────────────────────────────────────────────
 app.get('/api/auth/verify', (req, res) => {
     const auth  = req.headers['authorization'] || '';
     const token = auth.startsWith('Bearer ') ? auth.slice(7) : '';

@@ -43,12 +43,12 @@ function firstAllowedPage() {
     ['usuarios', 'usuarios.html']
   ];
   const found = order.find(([perm]) => hasPermission(perm));
-  return found ? found[1] : 'login.html';
+  return found ? found[1] : 'sessao.html';
 }
 
 function requireAuth() {
   const t = getToken();
-  if (!t || !t.token) window.location.replace('login.html');
+  if (!t || !t.token) window.location.replace('sessao.html');
 }
 
 function requirePermission(perm) {
@@ -58,7 +58,7 @@ function requirePermission(perm) {
 
 function logout() {
   sessionStorage.removeItem('ic_token');
-  window.location.replace('login.html');
+  window.location.replace('sessao.html');
 }
 
 function initUserLabel() {

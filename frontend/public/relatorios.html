@@ -357,16 +357,16 @@
     return tk ? { ...extra, Authorization:'Bearer ' + tk } : extra;
   }
 
-  function irParaLogin() {
+  function irParaSessaoEncerrada() {
     sessionStorage.removeItem('ic_token');
-    window.location.replace('login.html');
+    window.location.replace('sessao.html');
   }
 
   async function fetchJSON(url, options = {}) {
     const headers = authFetchHeaders(options.headers || {});
     const res = await fetch(url, { ...options, headers });
     if (res.status === 401) {
-      irParaLogin();
+      irParaSessaoEncerrada();
       throw new Error('Sessão expirada. Faça login novamente.');
     }
     if (!res.ok) {
@@ -673,7 +673,7 @@
         headers: authFetchHeaders({'Content-Type':'application/json'}),
         body: JSON.stringify(payload)
       });
-      if (res.status === 401) { irParaLogin(); return; }
+      if (res.status === 401) { irParaSessaoEncerrada(); return; }
       const json = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(json.erro || 'Erro ao registrar troca.');
       fecharModalTroca();
@@ -1034,7 +1034,7 @@
       body: JSON.stringify({ conteudo, relatorio })
     });
     if (res.status === 401) {
-      irParaLogin();
+      irParaSessaoEncerrada();
       throw new Error('Sessão expirada. Faça login novamente.');
     }
     const json = await res.json().catch(() => ({}));

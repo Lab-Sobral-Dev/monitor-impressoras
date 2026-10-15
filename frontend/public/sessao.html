@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Tinta Branca | Sessão encerrada</title>
+  <link rel="stylesheet" href="shared.css">
+  <style>
+    body { display: flex; align-items: center; justify-content: center; padding: 16px; }
+    .card { background: var(--card); border: 1px solid var(--bd); border-radius: 12px; padding: 36px 32px; max-width: 420px; width: 100%; text-align: center; }
+    .card img { height: 48px; margin-bottom: 20px; }
+    .card h1 { font-size: 20px; margin-bottom: 10px; }
+    .card p { color: var(--mt); font-size: 14px; line-height: 1.5; margin-bottom: 24px; }
+    .btn { display: inline-block; background: var(--accent); color: #fff; text-decoration: none; font-weight: 600; font-size: 14px; padding: 11px 22px; border-radius: 8px; }
+    .btn:hover { filter: brightness(0.95); }
+  </style>
+</head>
+<body>
+  <!-- Não existe login próprio: a única entrada é pelo Gestão (SSO). Esta página
+       aparece quando a sessão acaba (expirou, foi encerrada ou nunca existiu). -->
+  <main class="card">
+    <img src="logo.png" alt="Tinta Branca">
+    <h1>Sessão encerrada</h1>
+    <p>O acesso ao Tinta Branca é feito pelo Gestão. Abra o sistema novamente por lá para continuar.</p>
+    <a class="btn" id="voltar" href="https://gestao.laboratoriosobral.com.br/ti/monitor-impressoras" target="_top">Abrir pelo Gestão</a>
+  </main>
+
+  <script>
+    // Fora do iframe do Gestão não há o que mostrar — vai direto pra lá.
+    if (window.self === window.top) {
+      window.location.replace(document.getElementById('voltar').href);
+    }
+    sessionStorage.removeItem('ic_token');
+  </script>
+</body>
+</html>

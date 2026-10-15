@@ -9,6 +9,7 @@ jest.mock('net-snmp', () => ({
 
 const request = require('supertest');
 const { app, db, dbReady, estoqueTokens } = require('../server');
+const { assinarTokenAcoplamento, entrarViaSSO } = require('./sso');
 
 const IMP_VALIDA = { nome: 'Canon MF654', ip: '192.168.1.10', modelo: 'MF654Cdw', localizacao: 'Sala TI' };
 
@@ -32,10 +33,7 @@ async function obterToken() {
 }
 
 async function obterTokenAdmin() {
-    const res = await request(app)
-        .post('/api/auth/login')
-        .send({ usuario: 'admin', senha: 'admin-de-teste' });
-    return res.body.token;
+    return (await entrarViaSSO(app)).token;
 }
 
 async function authAdmin() {
@@ -92,6 +90,46 @@ describe('POST /api/auth/estoque', () => {
     });
 });
 
+// ── Entrada pelo Gestão (SSO) ─────────────────────────────────────────────────
+describe('GET /api/auth/sso', () => {
+    it('deve abrir sessão de admin com token válido do Gestão', async () => {
+        const sessao = await entrarViaSSO(app, `teste.sso.${Date.now()}`);
+        expect(sessao.perfil).toBe('admin');
+        expect(typeof sessao.token).toBe('string');
+
+        const res = await request(app).get('/api/auth/verify').set('Authorization', `Bearer ${sessao.token}`);
+        expect(res.status).toBe(200);
+        expect(res.body.ok).toBe(true);
+    });
+
+    it('deve recusar token com assinatura inválida', async () => {
+        const token = assinarTokenAcoplamento({ sub: 'intruso' }, 'segredo-errado');
+        const res = await request(app).get('/api/auth/sso').query({ token });
+        expect(res.status).toBe(401);
+    });
+
+    it('deve recusar token expirado', async () => {
+        const token = assinarTokenAcoplamento({ sub: 'atrasado', exp: Math.floor(Date.now() / 1000) - 1 });
+        const res = await request(app).get('/api/auth/sso').query({ token });
+        expect(res.status).toBe(401);
+    });
+
+    it('deve recusar usuário desativado', async () => {
+        const usuario = `teste.inativo.${Date.now()}`;
+        await entrarViaSSO(app, usuario);
+        await runDB('UPDATE usuarios SET ativo = 0 WHERE usuario = ?', [usuario]);
+        const res = await request(app).get('/api/auth/sso').query({ token: assinarTokenAcoplamento({ sub: usuario }) });
+        expect(res.status).toBe(401);
+    });
+});
+
+describe('Login por usuário e senha', () => {
+    it('não deve existir mais (entrada só pelo Gestão)', async () => {
+        const res = await request(app).post('/api/auth/login').send({ usuario: 'admin', senha: 'qualquer' });
+        expect(res.status).toBe(404);
+    });
+});
+
 describe('Gestao de usuarios', () => {
     it('deve listar especificacoes de acesso sem expor hash de senha', async () => {
         const usuario = `teste.acesso.${Date.now()}`;
@@ -109,32 +147,6 @@ describe('Gestao de usuarios', () => {
         expect(user).not.toHaveProperty('senha_hash');
     });
 
-    it('deve permitir alterar senha de usuario e liberar login sem troca obrigatoria', async () => {
-        const usuario = `teste.senha.${Date.now()}`;
-        const criado = await request(app)
-            .post('/api/usuarios')
-            .set(await authAdmin())
-            .send({ nome: 'Teste Senha', usuario, senha: 'senha123' });
-        expect(criado.status).toBe(201);
-
-        const lista = await request(app).get('/api/usuarios').set(await authAdmin());
-        const user = lista.body.find(u => u.usuario === usuario);
-
-        const upd = await request(app)
-            .put(`/api/usuarios/${user.id}`)
-            .set(await authAdmin())
-            .send({ senha: 'nova123', trocar_senha: false });
-        expect(upd.status).toBe(200);
-
-        const login = await request(app)
-            .post('/api/auth/login')
-            .send({ usuario, senha: 'nova123' });
-        expect(login.status).toBe(200);
-        expect(login.body.ok).toBe(true);
-        expect(login.body.trocar_senha).toBeUndefined();
-        expect(login.body.token).toBeTruthy();
-    });
-
     it('deve aplicar permissoes por usuario nas rotas protegidas', async () => {
         const usuario = `teste.perm.${Date.now()}`;
         await request(app)
@@ -147,27 +159,17 @@ describe('Gestao de usuarios', () => {
                 perfil: 'operador',
                 permissoes: ['relatorios']
             });
-        const lista = await request(app).get('/api/usuarios').set(await authAdmin());
-        const user = lista.body.find(u => u.usuario === usuario);
-        await request(app)
-            .put(`/api/usuarios/${user.id}`)
-            .set(await authAdmin())
-            .send({ trocar_senha: false });
-
-        const login = await request(app)
-            .post('/api/auth/login')
-            .send({ usuario, senha: 'senha123' });
-        expect(login.status).toBe(200);
-        expect(login.body.permissoes).toEqual(['relatorios']);
+        const sessao = await entrarViaSSO(app, usuario);
+        expect(sessao.permissoes).toEqual(['relatorios']);
 
         const negado = await request(app)
             .get('/api/usuarios')
-            .set('Authorization', `Bearer ${login.body.token}`);
+            .set('Authorization', `Bearer ${sessao.token}`);
         expect(negado.status).toBe(403);
 
         const permitido = await request(app)
             .get('/api/relatorios/disponibilidade')
-            .set('Authorization', `Bearer ${login.body.token}`);
+            .set('Authorization', `Bearer ${sessao.token}`);
         expect(permitido.status).toBe(200);
     });
 });

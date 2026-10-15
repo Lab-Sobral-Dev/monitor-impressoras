@@ -9,8 +9,7 @@ Sistema web para cadastro, monitoramento e administracao de impressoras em rede.
 - Monitoramento de niveis de tinta/toner por impressora.
 - Controle de estoque de suprimentos.
 - Gerenciamento de usuarios e permissoes.
-- Autenticacao por usuario e senha.
-- Suporte a WebAuthn/passkey e integracao Control iD quando configurados.
+- Acesso somente pelo Gestao (SSO do Protocolo de Acoplamento) — nao ha tela de login propria.
 - Relatorios de ficha tecnica, paginas impressas, consumo de tinta, trocas de toner, disponibilidade e estoque versus consumo.
 - Envio de impressao para impressoras de rede via IPP/RAW.
 - Descoberta de impressora por IP.
@@ -60,18 +59,13 @@ PORT=3000
 DATABASE_PATH=./banco.db
 SNMP_CONCURRENCY=5
 
-ADMIN_USER=admin
-ADMIN_SENHA=troque-esta-senha
 ESTOQUE_SENHA=troque-este-token
-
-WEBAUTHN_ORIGIN=http://localhost:3000
-WEBAUTHN_RP_ID=localhost
-WEBAUTHN_RP_NAME=Monitor de Impressoras
+DOCKING_SECRET_MONITOR_IMPRESSORAS=segredo-compartilhado-com-o-gestao
 
 ALLOWED_ORIGIN=http://localhost:3000
 ```
 
-Importante: troque `ADMIN_SENHA` e `ESTOQUE_SENHA` antes de usar o sistema em producao.
+Importante: troque `ESTOQUE_SENHA` antes de usar o sistema em producao. Sem `DOCKING_SECRET_MONITOR_IMPRESSORAS` ninguem consegue entrar, pois a unica porta de entrada e o SSO do Gestao.
 
 ## Execucao Local
 
@@ -144,7 +138,7 @@ npm test
 
 ## Principais Telas
 
-- `login.html`: acesso ao sistema.
+- `sessao.html`: aviso de sessao encerrada, com link para abrir o sistema pelo Gestao.
 - `admin.html`: dashboard administrativo.
 - `dispositivos.html`: lista e manutencao das impressoras.
 - `cadastrar.html`: cadastro de novos equipamentos.
@@ -162,7 +156,7 @@ npm test
 - `DELETE /api/impressoras/:id`: remove impressora.
 - `GET /api/estoque`: consulta estoque.
 - `POST /api/estoque`: atualiza estoque.
-- `POST /api/auth/login`: autentica usuario.
+- `GET /api/auth/sso?token=...`: entrada pelo Gestao (token JWT de acoplamento).
 - `GET /api/auth/verify`: valida sessao autenticada.
 - `GET /api/usuarios`: lista usuarios.
 - `POST /api/usuarios`: cria usuario.
@@ -176,8 +170,7 @@ npm test
 
 ## Observacoes de Producao
 
-- Use senhas fortes nas variaveis `ADMIN_SENHA` e `ESTOQUE_SENHA`.
+- Use valores fortes em `ESTOQUE_SENHA` e `DOCKING_SECRET_MONITOR_IMPRESSORAS`.
 - Configure `ALLOWED_ORIGIN` com o dominio real do frontend.
-- Para WebAuthn/passkeys fora de `localhost`, use HTTPS.
 - Garanta backup periodico do arquivo SQLite definido em `DATABASE_PATH`.
 - Verifique se as impressoras permitem consulta SNMP pela rede do servidor.

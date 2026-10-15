@@ -1,9 +1,9 @@
 // tests/pagelog.test.js
 'use strict';
 
-const { parsePageLogLine, db } = require('../server');
+const { parsePageLogLine, db, dbReady } = require('../server');
 
-afterAll(() => new Promise(resolve => db.close(resolve)));
+afterAll(() => dbReady.then(() => new Promise(resolve => db.close(resolve))));
 
 describe('parsePageLogLine', () => {
     it('faz parse de uma linha válida do page_log', () => {

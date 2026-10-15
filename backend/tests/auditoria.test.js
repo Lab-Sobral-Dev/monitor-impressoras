@@ -2,6 +2,7 @@
 
 const request = require('supertest');
 const { app, db, dbReady } = require('../server');
+const { entrarViaSSO } = require('./sso');
 
 function runDB(sql, params = []) {
     return new Promise((resolve, reject) => {
@@ -16,10 +17,7 @@ function limparImpressoes() {
 }
 
 async function obterTokenAdmin() {
-    const res = await request(app)
-        .post('/api/auth/login')
-        .send({ usuario: 'admin', senha: 'admin-de-teste' });
-    return res.body.token;
+    return (await entrarViaSSO(app)).token;
 }
 
 async function authAdmin() {
@@ -38,26 +36,7 @@ function inserirImpressao({ impressora, usuario, paginas, copias = 1, hostname_o
     );
 }
 
-function aguardarUsuarioAdmin() {
-    // O seed do usuário admin roda em .then(dbReady) com hash assíncrono (scrypt);
-    // dbReady sozinho não garante que o insert já terminou.
-    return new Promise((resolve, reject) => {
-        const inicio = Date.now();
-        (function tentar() {
-            db.get('SELECT id FROM usuarios WHERE usuario = ?', ['admin'], (err, row) => {
-                if (err) return reject(err);
-                if (row) return resolve();
-                if (Date.now() - inicio > 2000) return reject(new Error('timeout esperando seed do admin'));
-                setTimeout(tentar, 25);
-            });
-        })();
-    });
-}
-
-beforeAll(async () => {
-    await dbReady;
-    await aguardarUsuarioAdmin();
-});
+beforeAll(() => dbReady);
 beforeEach(() => limparImpressoes());
 afterAll(() => new Promise(resolve => db.close(resolve)));
 
@@ -73,15 +52,11 @@ describe('GET /api/relatorios/auditoria', () => {
             .post('/api/usuarios')
             .set(await authAdmin())
             .send({ nome: 'Sem Permissao', usuario, senha: 'senha123', perfil: 'operador', permissoes: ['dashboard'] });
-        const lista = await request(app).get('/api/usuarios').set(await authAdmin());
-        const user = lista.body.find(u => u.usuario === usuario);
-        await request(app).put(`/api/usuarios/${user.id}`).set(await authAdmin()).send({ trocar_senha: false });
-
-        const login = await request(app).post('/api/auth/login').send({ usuario, senha: 'senha123' });
+        const sessao = await entrarViaSSO(app, usuario);
 
         const res = await request(app)
             .get('/api/relatorios/auditoria')
-            .set('Authorization', `Bearer ${login.body.token}`);
+            .set('Authorization', `Bearer ${sessao.token}`);
         expect(res.status).toBe(403);
     });
 
