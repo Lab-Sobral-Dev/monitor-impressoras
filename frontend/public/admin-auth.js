@@ -91,6 +91,31 @@ function previsoesProximas(p, limite = 7) {
   return Object.entries(p.previsao_dias || {}).filter(([, dias]) => dias <= limite);
 }
 
+// Unidades em estoque da cor, no grupo que abastece a impressora
+function estoqueDaCor(p, cor) {
+  return Number(p.estoque?.[cor] ?? 0);
+}
+
+// "Estoque: Preto 4 · Ciano 0 · ..." para as cores que a impressora informa
+function linhaEstoque(p) {
+  const cores = (p.suprimentos || []).map(s => s.nome);
+  if (!cores.length || ehUSB(p)) return '';
+  const itens = cores.map(cor => {
+    const qtd = estoqueDaCor(p, cor);
+    return `<span class="${qtd === 0 ? 'est-zero' : ''}">${cor} ${qtd}</span>`;
+  });
+  return `<div class="linha-estoque" title="Grupo do estoque: ${p.estoque_modelo_efetivo || ''}">📦 Estoque: ${itens.join(' · ')}</div>`;
+}
+
+// Cores acabando (≤15% ou previsão ≤7 dias) sem nenhuma unidade para repor
+function semReposicao(p) {
+  const acabando = new Set([
+    ...(p.suprimentos || []).filter(s => s.percentual <= 15).map(s => s.nome),
+    ...previsoesProximas(p).map(([cor]) => cor)
+  ]);
+  return [...acabando].filter(cor => estoqueDaCor(p, cor) === 0);
+}
+
 // Interface web só faz sentido quando há algo respondendo no IP
 function temInterfaceWeb(p) {
   const s = situacaoImpressora(p);

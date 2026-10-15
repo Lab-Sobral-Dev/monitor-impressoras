@@ -46,7 +46,47 @@ function validarImpressora(body, obrigatorio = true) {
     if (numero_serie !== undefined && numero_serie !== null && (typeof numero_serie !== 'string' || numero_serie.length > 64)) {
         erros.push('numero_serie deve ser texto de até 64 caracteres');
     }
+    const { estoque_modelo } = body;
+    if (estoque_modelo !== undefined && estoque_modelo !== null && (typeof estoque_modelo !== 'string' || estoque_modelo.length > 120)) {
+        erros.push('estoque_modelo deve ser texto de até 120 caracteres');
+    }
     return erros;
+}
+
+// ── Ligação impressora ↔ estoque ──────────────────────────────────────────────
+// Grupo do estoque que abastece a impressora: o escolhido no cadastro
+// (estoque_modelo) ou, por padrão, o próprio modelo — exceto as Canon GX de
+// tinta, que compartilham as garrafas e ficam no grupo "Canon GX6010 / GX7010"
+// (mesma regra que a tela de Estoque sempre usou para agrupar).
+const GRUPO_CANON_GX = 'Canon GX6010 / GX7010';
+
+function modeloDeEstoque(imp) {
+    const escolhido = String(imp.estoque_modelo ?? '').trim();
+    if (escolhido) return escolhido;
+    const modelo = String(imp.modelo ?? '').trim().replace(/\s+/g, ' ');
+    if ((imp.material || 'Toner') === 'Tinta' && /6000|6010|7000|7010/.test(modelo)) return GRUPO_CANON_GX;
+    return modelo || 'Geral';
+}
+
+const CORES_INSUMO = [['preto', 'Preto'], ['black', 'Preto'], ['ciano', 'Ciano'], ['cyan', 'Ciano'],
+    ['magenta', 'Magenta'], ['amarelo', 'Amarelo'], ['yellow', 'Amarelo']];
+
+function corDoInsumo(insumo) {
+    const texto = String(insumo ?? '').toLowerCase();
+    return CORES_INSUMO.find(([chave]) => texto.includes(chave))?.[1] ?? null;
+}
+
+// { 'Brother DCP-T820DW': { Preto: 4, Ciano: 2, ... }, ... } — só itens novos
+async function carregarEstoquePorModelo() {
+    const linhas = await consultarTodos("SELECT modelo, insumo, quantidade FROM estoque WHERE estado = 'Novo' OR estado IS NULL");
+    const porModelo = {};
+    for (const l of linhas) {
+        const cor = corDoInsumo(l.insumo);
+        if (!cor) continue;
+        porModelo[l.modelo] ??= {};
+        porModelo[l.modelo][cor] = (porModelo[l.modelo][cor] || 0) + (Number(l.quantidade) || 0);
+    }
+    return porModelo;
 }
 
 function validarEstoque(body) {
@@ -99,13 +139,17 @@ async function refreshDashCache(rows) {
     if (dashRefreshing) return;
     dashRefreshing = true;
     try {
+        const estoquePorModelo = await carregarEstoquePorModelo();
         const resultados = await Promise.all(rows.map(async (imp) => {
             const snmpData = ehUSB(imp) ? SEM_MONITORAMENTO : await obterDadosSNMP(imp.ip, imp.comunidade);
+            const grupoEstoque = modeloDeEstoque(imp);
             return {
                 ...imp, material: imp.material || 'Toner', tipo: imp.tipo || 'Colorido', ...snmpData,
                 aparelho_divergente: serieDivergente(imp.numero_serie, snmpData.serie_detectada),
                 leitura_suspeita: leituraSuspeitaAtual(imp.id, snmpData),
-                previsao_dias: previsaoAtual(imp.id, snmpData)
+                previsao_dias: previsaoAtual(imp.id, snmpData),
+                estoque_modelo_efetivo: grupoEstoque,
+                estoque: estoquePorModelo[grupoEstoque] || {}
             };
         }));
         dashCache   = resultados;
@@ -289,6 +333,7 @@ const dbReady = new Promise(resolve => {
         db.run(`ALTER TABLE impressoras ADD COLUMN tipo TEXT`, () => {});
         db.run(`ALTER TABLE impressoras ADD COLUMN numero_serie TEXT`, () => {});
         db.run(`ALTER TABLE impressoras ADD COLUMN conexao TEXT NOT NULL DEFAULT 'rede'`, () => {});
+        db.run(`ALTER TABLE impressoras ADD COLUMN estoque_modelo TEXT`, () => {});
         db.run(`UPDATE impressoras SET material = 'Toner' WHERE material IS NULL`);
         db.run(`UPDATE impressoras SET tipo = 'Colorido' WHERE tipo IS NULL`);
         db.run(`CREATE TABLE IF NOT EXISTS estoque (
@@ -1146,7 +1191,7 @@ async function descobrirImpressora(ip) {
 // ── Rotas ─────────────────────────────────────────────────────────────────────
 
 app.get('/api/dashboard', exigirAlgumaPermissao(['dashboard', 'estoque']), (req, res, next) => {
-    db.all('SELECT id, nome, ip, modelo, localizacao, comunidade, tipo, material, numero_serie, conexao FROM impressoras', [], async (err, rows) => {
+    db.all('SELECT id, nome, ip, modelo, localizacao, comunidade, tipo, material, numero_serie, conexao, estoque_modelo FROM impressoras', [], async (err, rows) => {
         if (err) { console.error(err); return next(err); }
 
         const cacheValido = dashCache && Date.now() - dashCacheAt < DASH_TTL;
@@ -1174,7 +1219,7 @@ app.get('/api/dashboard', exigirAlgumaPermissao(['dashboard', 'estoque']), (req,
 });
 
 app.get('/api/impressoras', exigirAlgumaPermissao(['impressoras', 'estoque', 'relatorios']), (req, res, next) => {
-    db.all('SELECT id, nome AS fabricante, ip, modelo, localizacao, comunidade, tipo, material, numero_serie, conexao FROM impressoras ORDER BY id ASC', [], (err, rows) => {
+    db.all('SELECT id, nome AS fabricante, ip, modelo, localizacao, comunidade, tipo, material, numero_serie, conexao, estoque_modelo FROM impressoras ORDER BY id ASC', [], (err, rows) => {
         if (err) return next(err);
         res.json(rows);
     });
@@ -1184,11 +1229,11 @@ app.post('/api/impressoras', exigirPermissao('impressoras'), (req, res, next) =>
     const erros = validarImpressora(req.body, true);
     if (erros.length) return res.status(400).json({ erro: erros.join('; ') });
 
-    const { nome, ip, modelo, localizacao, comunidade, tipo, material, numero_serie } = req.body;
+    const { nome, ip, modelo, localizacao, comunidade, tipo, material, numero_serie, estoque_modelo } = req.body;
     const conexao = req.body.conexao || 'rede';
     db.run(
-        `INSERT INTO impressoras (nome, ip, modelo, localizacao, comunidade, tipo, material, numero_serie, conexao) VALUES (?,?,?,?,?,?,?,?,?)`,
-        [nome.trim(), conexao === 'usb' ? null : ip.trim(), modelo.trim(), localizacao?.trim?.() ?? localizacao, comunidade || 'public', tipo || 'Colorido', material || 'Toner', numero_serie?.trim() || null, conexao],
+        `INSERT INTO impressoras (nome, ip, modelo, localizacao, comunidade, tipo, material, numero_serie, conexao, estoque_modelo) VALUES (?,?,?,?,?,?,?,?,?,?)`,
+        [nome.trim(), conexao === 'usb' ? null : ip.trim(), modelo.trim(), localizacao?.trim?.() ?? localizacao, comunidade || 'public', tipo || 'Colorido', material || 'Toner', numero_serie?.trim() || null, conexao, estoque_modelo?.trim() || null],
         (err) => {
             if (err) { console.error(err); return next(err); }
             invalidarCacheDash();
@@ -1201,7 +1246,7 @@ app.put('/api/impressoras/:id', exigirPermissao('impressoras'), (req, res, next)
     const erros = validarImpressora(req.body, false);
     if (erros.length) return res.status(400).json({ erro: erros.join('; ') });
 
-    const { nome, modelo, ip, localizacao, comunidade, tipo, material, numero_serie, conexao } = req.body;
+    const { nome, modelo, ip, localizacao, comunidade, tipo, material, numero_serie, conexao, estoque_modelo } = req.body;
     db.get('SELECT * FROM impressoras WHERE id = ?', [req.params.id], (err, existing) => {
         if (err) { console.error(err); return next(err); }
         if (!existing) return res.status(404).json({ erro: 'Impressora não encontrada' });
@@ -1209,7 +1254,7 @@ app.put('/api/impressoras/:id', exigirPermissao('impressoras'), (req, res, next)
         const ipFinal = conexaoFinal === 'usb' ? null : (String(ip ?? existing.ip ?? '').trim() || null);
         if (!ipFinal && conexaoFinal === 'rede') return res.status(400).json({ erro: 'ip é obrigatório para impressora de rede' });
         db.run(
-            `UPDATE impressoras SET nome = ?, modelo = ?, ip = ?, localizacao = ?, comunidade = ?, tipo = ?, material = ?, numero_serie = ?, conexao = ? WHERE id = ?`,
+            `UPDATE impressoras SET nome = ?, modelo = ?, ip = ?, localizacao = ?, comunidade = ?, tipo = ?, material = ?, numero_serie = ?, conexao = ?, estoque_modelo = ? WHERE id = ?`,
             [
                 (nome        ?? existing.nome)?.trim?.()    ?? existing.nome,
                 (modelo      ?? existing.modelo)?.trim?.()  ?? existing.modelo,
@@ -1220,6 +1265,7 @@ app.put('/api/impressoras/:id', exigirPermissao('impressoras'), (req, res, next)
                 material     ?? existing.material,
                 numero_serie === undefined ? existing.numero_serie : (numero_serie?.trim() || null),
                 conexaoFinal,
+                estoque_modelo === undefined ? existing.estoque_modelo : (estoque_modelo?.trim() || null),
                 req.params.id
             ],
             function (err) {
@@ -1246,6 +1292,14 @@ app.get('/api/estoque', exigirPermissao('estoque'), (req, res) => {
     });
 });
 
+// Grupos de estoque existentes — para escolher qual abastece cada impressora
+app.get('/api/estoque/modelos', exigirAlgumaPermissao(['impressoras', 'estoque']), (req, res, next) => {
+    db.all('SELECT DISTINCT modelo FROM estoque ORDER BY modelo', [], (err, rows) => {
+        if (err) return next(err);
+        res.json(rows.map(r => r.modelo));
+    });
+});
+
 app.post('/api/estoque', exigirPermissao('estoque'), (req, res, next) => {
     const erros = validarEstoque(req.body);
     if (erros.length) return res.status(400).json({ erro: erros.join('; ') });
@@ -1257,6 +1311,7 @@ app.post('/api/estoque', exigirPermissao('estoque'), (req, res, next) => {
         [modelo, insumo, quantidade, estado || 'Novo'],
         (err) => {
             if (err) { console.error(err); return next(err); }
+            invalidarCacheDash(); // o painel mostra o estoque de cada impressora
             res.status(201).json({ sucesso: true });
         }
     );
@@ -1266,6 +1321,7 @@ app.delete('/api/estoque/:id', exigirPermissao('estoque'), (req, res, next) => {
     db.run('DELETE FROM estoque WHERE id = ?', req.params.id, function (err) {
         if (err) { console.error(err); return next(err); }
         if (this.changes === 0) return res.status(404).json({ erro: 'Item não encontrado' });
+        invalidarCacheDash();
         res.status(204).end();
     });
 });
@@ -1829,33 +1885,57 @@ app.get('/api/relatorios/auditoria', exigirPermissao('relatorios'), (req, res, n
     );
 });
 
-app.get('/api/relatorios/estoque', exigirPermissao('relatorios'), (req, res, next) => {
-    db.all(
-        `SELECT e.modelo, e.insumo, e.quantidade AS estoque_atual,
-                ROUND(AVG(c.consumo_dia), 3) AS consumo_dia_medio,
-                CASE WHEN ROUND(AVG(c.consumo_dia), 3) > 0
-                     THEN ROUND(e.quantidade / ROUND(AVG(c.consumo_dia), 3))
-                     ELSE NULL END AS dias_estimados
-         FROM estoque e
-         LEFT JOIN (
-             SELECT impressora_id, cor,
-                    (MAX(percentual) - MIN(percentual)) /
-                    MAX(julianday(MAX(coletado_em)) - julianday(MIN(coletado_em)), 1) AS consumo_dia
-             FROM historico_tinta
-             WHERE coletado_em >= datetime('now', '-30 days')
-             GROUP BY impressora_id, cor
-         ) c ON LOWER(c.cor) = LOWER(
-             CASE WHEN LOWER(e.insumo) LIKE '%preto%'   OR LOWER(e.insumo) LIKE '%black%'   THEN 'preto'
-                  WHEN LOWER(e.insumo) LIKE '%ciano%'   OR LOWER(e.insumo) LIKE '%cyan%'    THEN 'ciano'
-                  WHEN LOWER(e.insumo) LIKE '%magenta%'                                      THEN 'magenta'
-                  WHEN LOWER(e.insumo) LIKE '%amarelo%' OR LOWER(e.insumo) LIKE '%yellow%'  THEN 'amarelo'
-                  ELSE e.insumo END)
-         GROUP BY e.id ORDER BY dias_estimados ASC, e.modelo ASC`,
-        [], (err, rows) => {
-            if (err) return next(err);
-            res.json(rows);
-        }
-    );
+// Estoque × consumo: para cada item do estoque, soma o consumo (pontos
+// percentuais por dia) das impressoras abastecidas por aquele grupo — antes
+// somava qualquer impressora da mesma cor, de qualquer modelo. Uma unidade em
+// estoque = 100% de um cartucho/garrafa.
+function consumoDiarioPorImpressora(historico) {
+    const series = new Map();
+    for (const h of historico) {
+        const chave = `${h.impressora_id}|${h.cor}`;
+        if (!series.has(chave)) series.set(chave, []);
+        series.get(chave).push({ percentual: h.percentual, em: Date.parse(h.coletado_em) });
+    }
+    const consumo = new Map();
+    for (const [chave, leituras] of series) {
+        leituras.sort((a, b) => a.em - b.em);
+        const dias = (leituras[leituras.length - 1].em - leituras[0].em) / DIA_MS;
+        if (dias < 1) continue;
+        let quedas = 0;
+        for (let i = 1; i < leituras.length; i++) quedas += Math.max(0, leituras[i - 1].percentual - leituras[i].percentual);
+        consumo.set(chave, quedas / dias);
+    }
+    return consumo;
+}
+
+app.get('/api/relatorios/estoque', exigirPermissao('relatorios'), async (req, res, next) => {
+    try {
+        const desde = new Date(Date.now() - 30 * DIA_MS).toISOString();
+        const [estoque, impressoras, historico] = await Promise.all([
+            consultarTodos('SELECT id, modelo, insumo, quantidade FROM estoque ORDER BY modelo, insumo'),
+            consultarTodos('SELECT id, modelo, material, estoque_modelo FROM impressoras'),
+            consultarTodos('SELECT impressora_id, cor, percentual, coletado_em FROM historico_tinta WHERE coletado_em >= ?', [desde])
+        ]);
+        const consumo = consumoDiarioPorImpressora(historico);
+        const linhas = estoque.map(e => {
+            const cor = corDoInsumo(e.insumo);
+            const abastecidas = impressoras.filter(i => modeloDeEstoque(i) === e.modelo);
+            const medidas = abastecidas.map(i => consumo.get(`${i.id}|${cor}`)).filter(c => c !== undefined);
+            const total = medidas.reduce((a, b) => a + b, 0);
+            return {
+                modelo: e.modelo,
+                insumo: e.insumo,
+                estoque_atual: e.quantidade,
+                impressoras: abastecidas.length,
+                consumo_dia_medio: medidas.length ? Math.round(total * 1000) / 1000 : null,
+                dias_estimados: total > 0 ? Math.round((e.quantidade * 100) / total) : null
+            };
+        });
+        linhas.sort((a, b) => (a.dias_estimados ?? Infinity) - (b.dias_estimados ?? Infinity) || a.modelo.localeCompare(b.modelo));
+        res.json(linhas);
+    } catch (e) {
+        next(e);
+    }
 });
 
 // eslint-disable-next-line no-unused-vars
@@ -1865,7 +1945,7 @@ app.use((err, req, res, next) => {
 });
 
 module.exports = { app, db, dbReady, estoqueTokens, parsePageLogLine, coletarImpressoes, interpretarSuprimentos, serieDivergente, verificarPresencaNaRede, interpretarConsumiveisHP, interpretarSuprimentosHPWeb,
-    detectarLeituraParada, atualizarLeiturasParadas, limparHistoricoAntigo, horasDoExpediente, preverFimDosSuprimentos };
+    detectarLeituraParada, atualizarLeiturasParadas, limparHistoricoAntigo, horasDoExpediente, preverFimDosSuprimentos, modeloDeEstoque };
 
 // ── Inicialização e graceful shutdown (apenas quando executado diretamente) ────
 if (require.main === module) {

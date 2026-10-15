@@ -185,6 +185,8 @@
             const cores = (p.suprimentos||[]).filter(s=>s.percentual<=15).map(s=>s.nome+' '+s.percentual+'%').join(', ');
             motivos.push('Tinta crítica: ' + cores);
           }
+          const semEstoque = p.online ? semReposicao(p) : [];
+          if (semEstoque.length) motivos.push('Sem reposição no estoque: ' + semEstoque.join(', '));
           const dadosAlerta = encodeURIComponent(JSON.stringify({
             nome: p.nome || p.modelo,
             ip: p.ip,

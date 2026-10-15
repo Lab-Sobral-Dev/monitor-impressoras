@@ -283,6 +283,7 @@
                 </div>`;
             }).join('') : `<div class="nosnmp">${esc(motivoSemDados(p))}</div>`}
             ${p.leitura_suspeita ? `<div class="aviso-leitura" role="note">⚠️ ${esc(avisoLeituraSuspeita(p))}</div>` : ''}
+            ${linhaEstoque(p)}
           </div>
           <div class="cfoot">
             <span class="lck">Verificado: ${agora}</span>

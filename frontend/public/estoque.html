@@ -23,6 +23,8 @@
     .toner-card:hover { border-color: var(--accent); }
     .toner-card.locked .controls { opacity: .3; pointer-events: none; }
     .toner-card.locked { border-color: #ddd; }
+    .toner-card.zerado { border-color: rgba(239,68,68,.45); }
+    .toner-card.zerado .val { color: var(--no); }
     .indicator { height: 3px; width: 30px; margin: 0 auto 8px; border-radius: 2px; }
     .bg-cyan { background: #06b6d4; } .bg-magenta { background: #d946ef; }
     .bg-yellow { background: #eab308; } .bg-black { background: #64748b; }
@@ -235,6 +237,7 @@
     const span = card.querySelector('.val');
     const novo = Math.max(0, parseInt(span.textContent) + delta);
     span.textContent = novo; span.style.color = 'var(--accent)';
+    card.classList.toggle('zerado', novo === 0);
     try {
       const res = await fetch('/api/estoque', {
         method:'POST',
@@ -242,7 +245,7 @@
         body:JSON.stringify({modelo:mod, insumo, quantidade:novo, estado:'Novo'})
       });
       if (!res.ok) throw new Error();
-      setTimeout(() => { span.style.color = 'var(--tx)'; }, 400);
+      setTimeout(() => { span.style.color = ''; }, 400);
     } catch { showToast('Erro ao salvar!', true); carregar(); }
   }
 
@@ -273,18 +276,13 @@
       containerTinta.innerHTML = ''; containerToner.innerHTML = '';
       let temTinta = false, temToner = false;
       const agrupados = {};
+      // O servidor decide qual grupo do estoque abastece cada impressora; a tela
+      // lê e grava sempre nesse mesmo grupo (antes gravava no grupo e lia pelo
+      // modelo da impressora, e as Canon GX apareciam zeradas).
       imps.forEach(p => {
-        const m = (p.modelo||'').trim().toUpperCase();
-        const isTintaP = (p.material || 'Toner') === 'Tinta';
-        let chave;
-        if (isTintaP && (m.includes('6000') || m.includes('6010') || m.includes('7000') || m.includes('7010'))) {
-          chave = 'Canon GX6010 / GX7010';
-        } else {
-          chave = (p.modelo||'Geral').trim().replace(/\s+/g,' ');
-        }
-        if (!agrupados[chave]) agrupados[chave] = {...p, modelo:chave, localizacoes:[], modelosOriginais:new Set()};
+        const chave = p.estoque_modelo_efetivo || (p.modelo||'Geral').trim().replace(/\s+/g,' ');
+        if (!agrupados[chave]) agrupados[chave] = {...p, modelo:chave, localizacoes:[]};
         if (p.localizacao) agrupados[chave].localizacoes.push(p.localizacao);
-        agrupados[chave].modelosOriginais.add((p.modelo||'').trim());
       });
       Object.entries(agrupados).forEach(([modelo, info]) => {
         const cores   = CORES_MAP[info.tipo] || CORES_MAP['Colorido'];
@@ -312,11 +310,10 @@
           <div class="stock-grid" id="${gridID}"></div>`;
         (isTinta ? containerTinta : containerToner).appendChild(group);
         cores.forEach(cor => {
-          const modelos    = [...info.modelosOriginais];
-          const registros  = estoque.filter(e => modelos.some(m => e.modelo===m) && e.insumo===cor);
+          const registros  = estoque.filter(e => e.modelo===modelo && e.insumo===cor);
           const quantidade = registros.reduce((acc,e) => acc+(e.quantidade||0), 0);
           document.getElementById(gridID).innerHTML += `
-            <div class="toner-card${desbloq?'':' locked'}" data-insumo="${cor}">
+            <div class="toner-card${desbloq?'':' locked'}${quantidade===0?' zerado':''}" data-insumo="${cor}" title="${quantidade===0?'Sem unidades em estoque':''}">
               <div class="indicator ${corClasse(cor)}"></div>
               <div class="toner-name">${cor}</div>
               <div class="controls">

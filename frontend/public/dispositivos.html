@@ -43,6 +43,9 @@
     <input type="text" id="editIp" class="modal-input" placeholder="192.168.1.50">
     <span class="modal-label">Número de série</span>
     <input type="text" id="editSerie" class="modal-input" maxlength="64" placeholder="Ex: KNDX03073">
+    <span class="modal-label">Suprimento no estoque</span>
+    <input type="text" id="editEstoque" class="modal-input" list="listaEstoque" maxlength="120" placeholder="Automático (pelo modelo)">
+    <datalist id="listaEstoque"></datalist>
     <span class="modal-label">Localização</span>
     <input type="text" id="editLocalizacao" class="modal-input" placeholder="Ex: 2º Andar - Sala 201">
     <div class="modal-actions">
@@ -156,6 +159,14 @@
     });
   });
 
+  // Grupos existentes no estoque, para sugerir no campo "Suprimento no estoque"
+  fetch('/api/estoque/modelos', { headers: authHeaders() })
+    .then(r => r.ok ? r.json() : [])
+    .then(modelos => {
+      document.getElementById('listaEstoque').innerHTML = modelos.map(m => `<option value="${esc(m)}"></option>`).join('');
+    })
+    .catch(() => {});
+
   async function carregar() {
     document.getElementById('loader').classList.add('show');
     try {
@@ -191,7 +202,7 @@
         <td style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
           ${ehUSB(p) ? '' : `<a class="btn-tinta" href="http://${esc(p.ip)}" target="_blank" rel="noopener">🔗 Interface</a>
           <button class="btn-print" data-id="${p.id}" data-nome="${esc(p.modelo||'Impressora')}" onclick="abrirImpressao(this)">▶ Imprimir</button>`}
-          <button class="btn-edit" data-id="${p.id}" data-fab="${esc(p.fabricante||'')}" data-mod="${esc(p.modelo||'')}" data-ip="${esc(p.ip||'')}" data-conexao="${esc(p.conexao||'rede')}" data-serie="${esc(p.numero_serie||'')}" data-loc="${esc(p.localizacao||'')}" onclick="abrirEdicao(this)">✏️ Editar</button>
+          <button class="btn-edit" data-id="${p.id}" data-fab="${esc(p.fabricante||'')}" data-mod="${esc(p.modelo||'')}" data-ip="${esc(p.ip||'')}" data-conexao="${esc(p.conexao||'rede')}" data-estoque="${esc(p.estoque_modelo||'')}" data-serie="${esc(p.numero_serie||'')}" data-loc="${esc(p.localizacao||'')}" onclick="abrirEdicao(this)">✏️ Editar</button>
           <button class="btn-del" onclick="del(${p.id})">✕</button>
         </td>
       </tr>`).join('');
@@ -205,6 +216,7 @@
     document.getElementById('editConexao').value     = btn.dataset.conexao;
     atualizarConexaoEdicao();
     document.getElementById('editSerie').value       = btn.dataset.serie;
+    document.getElementById('editEstoque').value     = btn.dataset.estoque;
     document.getElementById('editLocalizacao').value = btn.dataset.loc;
     document.getElementById('modalEdit').classList.add('open');
   }
@@ -225,12 +237,13 @@
     const localizacao = document.getElementById('editLocalizacao').value.trim();
     const numero_serie = document.getElementById('editSerie').value.trim();
     const conexao     = document.getElementById('editConexao').value;
+    const estoque_modelo = document.getElementById('editEstoque').value.trim();
     if (conexao === 'rede' && !ip) { showToast('Preencha o IP ou escolha conexão USB', true); return; }
     if (!modelo) { showToast('Preencha o Modelo/Setor', true); return; }
     try {
       const res = await fetch(`/api/impressoras/${id}`, {
         method: 'PUT', headers: authHeaders(),
-        body: JSON.stringify({ nome: fabricante, modelo, ip, localizacao, numero_serie, conexao })
+        body: JSON.stringify({ nome: fabricante, modelo, ip, localizacao, numero_serie, conexao, estoque_modelo })
       });
       if (!res.ok) throw new Error();
       document.getElementById('modalEdit').classList.remove('open');
