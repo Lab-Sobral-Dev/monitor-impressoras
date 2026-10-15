@@ -2,7 +2,7 @@
 'use strict';
 
 // Detecção de leitura não confiável: nível parado apesar de muitas páginas impressas
-const { detectarLeituraParada, db, dbReady } = require('../server');
+const { detectarLeituraParada, limparHistoricoAntigo, db, dbReady } = require('../server');
 
 afterAll(() => dbReady.then(() => new Promise(resolve => db.close(resolve))));
 
@@ -63,5 +63,32 @@ describe('detectarLeituraParada', () => {
 
     it('sem histórico de tinta não há o que avaliar', () => {
         expect(detectarLeituraParada([], [], AGORA)).toBeNull();
+    });
+});
+
+describe('limparHistoricoAntigo', () => {
+    const run = (sql, p = []) => new Promise((ok, erro) => db.run(sql, p, e => e ? erro(e) : ok()));
+    const contar = (tabela) => new Promise((ok, erro) =>
+        db.get(`SELECT COUNT(*) AS n FROM ${tabela} WHERE impressora_id = 999`, [], (e, r) => e ? erro(e) : ok(r.n)));
+    const haDias = d => new Date(AGORA - d * DIA).toISOString();
+
+    beforeAll(async () => {
+        await dbReady;
+        for (const d of [10, 400, 800]) {
+            await run('INSERT INTO historico_tinta (impressora_id, cor, percentual, coletado_em) VALUES (999, ?, 50, ?)', ['Preto', haDias(d)]);
+            await run('INSERT INTO historico_status (impressora_id, online, registrado_em) VALUES (999, 1, ?)', [haDias(d)]);
+        }
+        for (const d of [10, 3 * 365, 7 * 365]) {
+            await run('INSERT INTO historico_paginas (impressora_id, paginas_total, coletado_em) VALUES (999, 100, ?)', [haDias(d)]);
+        }
+    });
+
+    it('remove tinta/status com mais de 2 anos e páginas com mais de 6 anos', async () => {
+        const removidas = await limparHistoricoAntigo(AGORA);
+        expect(removidas).toEqual({ historico_tinta: 1, historico_status: 1, historico_paginas: 1 });
+        expect(await contar('historico_tinta')).toBe(2);
+        expect(await contar('historico_status')).toBe(2);
+        // 3 anos de páginas continuam: o relatório anual consulta até 5 anos
+        expect(await contar('historico_paginas')).toBe(2);
     });
 });

@@ -895,6 +895,35 @@ function consultarTodos(sql, params = []) {
     return new Promise((resolve, reject) => db.all(sql, params, (err, rows) => err ? reject(err) : resolve(rows)));
 }
 
+function executar(sql, params = []) {
+    return new Promise((resolve, reject) => db.run(sql, params, function (err) { err ? reject(err) : resolve(this); }));
+}
+
+// ── Limpeza do histórico antigo ───────────────────────────────────────────────
+// A coleta grava ~1 linha por impressora/cor por hora. Retenção com folga sobre
+// a maior janela consultada: tinta e status até 180 dias nos relatórios (365 na
+// leitura não confiável); páginas até 5 anos (relatório anual).
+const RETENCAO_HISTORICO = [
+    { tabela: 'historico_tinta',   coluna: 'coletado_em',   dias: 2 * 365 },
+    { tabela: 'historico_status',  coluna: 'registrado_em', dias: 2 * 365 },
+    { tabela: 'historico_paginas', coluna: 'coletado_em',   dias: 6 * 365 },
+];
+
+async function limparHistoricoAntigo(agora = Date.now()) {
+    const removidas = {};
+    try {
+        for (const { tabela, coluna, dias } of RETENCAO_HISTORICO) {
+            const limite = new Date(agora - dias * DIA_MS).toISOString();
+            removidas[tabela] = (await executar(`DELETE FROM ${tabela} WHERE ${coluna} < ?`, [limite])).changes;
+        }
+        const total = Object.values(removidas).reduce((a, b) => a + b, 0);
+        if (total) console.log('Histórico antigo removido:', removidas);
+    } catch (e) {
+        console.error('Erro ao limpar histórico antigo:', e.message);
+    }
+    return removidas;
+}
+
 async function atualizarLeiturasParadas() {
     try {
         const limite = new Date(Date.now() - 365 * DIA_MS).toISOString();
@@ -1741,7 +1770,7 @@ app.use((err, req, res, next) => {
 });
 
 module.exports = { app, db, dbReady, estoqueTokens, parsePageLogLine, coletarImpressoes, interpretarSuprimentos, serieDivergente, verificarPresencaNaRede, interpretarConsumiveisHP, interpretarSuprimentosHPWeb,
-    detectarLeituraParada, atualizarLeiturasParadas };
+    detectarLeituraParada, atualizarLeiturasParadas, limparHistoricoAntigo };
 
 // ── Inicialização e graceful shutdown (apenas quando executado diretamente) ────
 if (require.main === module) {
@@ -1749,6 +1778,8 @@ if (require.main === module) {
     const server = app.listen(PORT, () => console.log(`Servidor em http://localhost:${PORT}`));
 
     dbReady.then(() => {
+        limparHistoricoAntigo();
+        setInterval(limparHistoricoAntigo, 24 * 60 * 60 * 1000).unref();
         atualizarLeiturasParadas();
         coletarHistorico();
         setInterval(coletarHistorico, 60 * 60 * 1000).unref();
