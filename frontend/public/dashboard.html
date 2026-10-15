@@ -209,6 +209,7 @@
               </div>`).join('') : `<div class="nosnmp">${esc(motivoSemDados(p))}</div>`}
           </div>
           ${baixa ? '<div class="alert-low" role="alert">Tinta crítica — verificar reposição</div>' : ''}
+          ${p.leitura_suspeita ? `<div class="aviso-leitura" role="note">⚠️ ${esc(avisoLeituraSuspeita(p))}</div>` : ''}
           <div class="cf">
             <span class="lck">Verificado: ${agora}</span>
             ${temInterfaceWeb(p)

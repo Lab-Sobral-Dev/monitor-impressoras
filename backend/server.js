@@ -102,7 +102,8 @@ async function refreshDashCache(rows) {
             const snmpData = ehUSB(imp) ? SEM_MONITORAMENTO : await obterDadosSNMP(imp.ip, imp.comunidade);
             return {
                 ...imp, material: imp.material || 'Toner', tipo: imp.tipo || 'Colorido', ...snmpData,
-                aparelho_divergente: serieDivergente(imp.numero_serie, snmpData.serie_detectada)
+                aparelho_divergente: serieDivergente(imp.numero_serie, snmpData.serie_detectada),
+                leitura_suspeita: leituraSuspeitaAtual(imp.id, snmpData)
             };
         }));
         dashCache   = resultados;
@@ -354,6 +355,10 @@ const dbReady = new Promise(resolve => {
             registrado_em TEXT DEFAULT (datetime('now')),
             FOREIGN KEY (impressora_id) REFERENCES impressoras(id) ON DELETE CASCADE
         )`);
+        // Histórico cresce ~1 linha por impressora/cor por hora — consultas por impressora e data
+        db.run(`CREATE INDEX IF NOT EXISTS idx_historico_tinta_impressora ON historico_tinta (impressora_id, coletado_em)`);
+        db.run(`CREATE INDEX IF NOT EXISTS idx_historico_paginas_impressora ON historico_paginas (impressora_id, coletado_em)`);
+        db.run(`CREATE INDEX IF NOT EXISTS idx_historico_status_impressora ON historico_status (impressora_id, registrado_em)`);
         db.run(`CREATE TABLE IF NOT EXISTS impressoes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             impressora TEXT,
@@ -767,7 +772,77 @@ async function coletarHistorico() {
                     [imp.id, paginas, agora]);
             }
         }
+        await atualizarLeiturasParadas();
     });
+}
+
+// ── Leitura não confiável ─────────────────────────────────────────────────────
+// Algumas impressoras informam sempre o mesmo nível (ex.: Epson com tinta
+// compatível/a granel ou chip que "zera", cartucho de contrato sempre em 0%).
+// Se nenhuma cor muda há LEITURA_PARADA_DIAS e a impressora imprimiu ao menos
+// LEITURA_PARADA_PAGINAS nesse período, o nível exibido provavelmente não é real.
+const LEITURA_PARADA_DIAS    = 14;
+const LEITURA_PARADA_PAGINAS = 500;
+const SALTO_MAXIMO_CONTADOR  = 50000; // salto maior = contador de outro aparelho (troca no mesmo IP)
+const DIA_MS = 24 * 60 * 60 * 1000;
+
+let leiturasParadas = new Map(); // impressora_id → resultado de detectarLeituraParada
+
+// tinta: [{ cor, percentual, em }], paginas: [{ total, em }] — `em` em milissegundos
+function detectarLeituraParada(tinta, paginas, agora = Date.now()) {
+    if (!tinta.length) return null;
+    const ordenadas = [...tinta].sort((a, b) => a.em - b.em);
+    const ultimaColeta = ordenadas[ordenadas.length - 1].em;
+    const atual = new Map(ordenadas.filter(t => t.em === ultimaColeta).map(t => [t.cor, t.percentual]));
+
+    // O trecho parado começa na mudança mais recente entre todas as cores
+    let desde = ordenadas[0].em;
+    for (const t of ordenadas) {
+        if (atual.has(t.cor) && t.percentual !== atual.get(t.cor) && t.em > desde) desde = t.em;
+    }
+
+    let impressas = 0;
+    const contadores = paginas.filter(p => p.em >= desde && p.total !== null).sort((a, b) => a.em - b.em);
+    for (let i = 1; i < contadores.length; i++) {
+        const delta = contadores[i].total - contadores[i - 1].total;
+        if (delta > 0 && delta <= SALTO_MAXIMO_CONTADOR) impressas += delta;
+    }
+
+    const dias = Math.floor((agora - desde) / DIA_MS);
+    if (dias < LEITURA_PARADA_DIAS || impressas < LEITURA_PARADA_PAGINAS) return null;
+    return { desde: new Date(desde).toISOString(), dias, paginas: impressas, niveis: Object.fromEntries(atual) };
+}
+
+function consultarTodos(sql, params = []) {
+    return new Promise((resolve, reject) => db.all(sql, params, (err, rows) => err ? reject(err) : resolve(rows)));
+}
+
+async function atualizarLeiturasParadas() {
+    try {
+        const limite = new Date(Date.now() - 365 * DIA_MS).toISOString();
+        const emMs = r => ({ ...r, em: Date.parse(r.em) });
+        const impressoras = await consultarTodos("SELECT id FROM impressoras WHERE conexao <> 'usb'");
+        const resultado = new Map();
+        for (const { id } of impressoras) {
+            const tinta = await consultarTodos(
+                'SELECT cor, percentual, coletado_em AS em FROM historico_tinta WHERE impressora_id = ? AND coletado_em >= ?', [id, limite]);
+            const paginas = await consultarTodos(
+                'SELECT paginas_total AS total, coletado_em AS em FROM historico_paginas WHERE impressora_id = ? AND coletado_em >= ?', [id, limite]);
+            const parada = detectarLeituraParada(tinta.map(emMs), paginas.map(emMs));
+            if (parada) resultado.set(id, parada);
+        }
+        leiturasParadas = resultado;
+    } catch (e) {
+        console.error('Erro ao avaliar leituras paradas:', e.message);
+    }
+}
+
+// Só vale se a leitura ao vivo continua exatamente nos níveis parados
+function leituraSuspeitaAtual(impressoraId, snmpData) {
+    const parada = leiturasParadas.get(impressoraId);
+    if (!parada || !snmpData.online || !snmpData.suprimentos?.length) return null;
+    const iguais = snmpData.suprimentos.every(s => parada.niveis[s.nome] === s.percentual);
+    return iguais ? parada : null;
 }
 
 // ── Auditoria de impressão por usuário (page_log do CUPS, PRINTSRV/.216) ───────
@@ -1587,7 +1662,8 @@ app.use((err, req, res, next) => {
     res.status(500).json({ erro: 'Erro interno do servidor' });
 });
 
-module.exports = { app, db, dbReady, estoqueTokens, parsePageLogLine, coletarImpressoes, interpretarSuprimentos, serieDivergente, verificarPresencaNaRede, interpretarConsumiveisHP };
+module.exports = { app, db, dbReady, estoqueTokens, parsePageLogLine, coletarImpressoes, interpretarSuprimentos, serieDivergente, verificarPresencaNaRede, interpretarConsumiveisHP,
+    detectarLeituraParada, atualizarLeiturasParadas };
 
 // ── Inicialização e graceful shutdown (apenas quando executado diretamente) ────
 if (require.main === module) {
@@ -1595,6 +1671,7 @@ if (require.main === module) {
     const server = app.listen(PORT, () => console.log(`Servidor em http://localhost:${PORT}`));
 
     dbReady.then(() => {
+        atualizarLeiturasParadas();
         coletarHistorico();
         setInterval(coletarHistorico, 60 * 60 * 1000).unref();
 

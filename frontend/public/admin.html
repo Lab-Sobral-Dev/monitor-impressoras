@@ -161,7 +161,7 @@
       document.getElementById('stat-offline').textContent = dash.filter(estaOffline).length;
       document.getElementById('stat-baixa').textContent   = dash.filter(p => p.online && tBaixa(p)).length;
 
-      const alertas   = dash.filter(p => estaOffline(p) || semLeituraSNMP(p) || (p.online && tBaixa(p)) || p.aparelho_divergente);
+      const alertas   = dash.filter(p => estaOffline(p) || semLeituraSNMP(p) || (p.online && tBaixa(p)) || p.aparelho_divergente || p.leitura_suspeita);
       const alertasEl = document.getElementById('alertas-body');
       if (!alertas.length) {
         alertasEl.innerHTML = '<div class="alert-ok">✓ Tudo funcionando normalmente</div>';
@@ -172,6 +172,10 @@
           if (semLeituraSNMP(p)) motivos.push('Ligada, mas sem leitura SNMP (verifique SNMP/comunidade ou se o IP é de outro aparelho)');
           if (p.aparelho_divergente) {
             motivos.push(`Aparelho diferente do cadastrado: no IP está ${p.modelo_detectado || 'outro aparelho'} (série ${p.serie_detectada}); o cadastro tem a série ${p.numero_serie}. Atualize em Dispositivos.`);
+          }
+          if (p.leitura_suspeita) {
+            const r = p.leitura_suspeita;
+            motivos.push(`Leitura não confiável: nível parado há ${r.dias} dias com ${Number(r.paginas).toLocaleString('pt-BR')} páginas impressas`);
           }
           if (p.online && tBaixa(p)) {
             const cores = (p.suprimentos||[]).filter(s=>s.percentual<=15).map(s=>s.nome+' '+s.percentual+'%').join(', ');

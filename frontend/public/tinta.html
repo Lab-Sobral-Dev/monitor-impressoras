@@ -282,6 +282,7 @@
                   <div class="bar"><div class="fill ${c} ${low ? 'low' : ''}" style="width:${s.percentual}%" role="progressbar" aria-valuenow="${s.percentual}" aria-valuemin="0" aria-valuemax="100"></div></div>
                 </div>`;
             }).join('') : `<div class="nosnmp">${esc(motivoSemDados(p))}</div>`}
+            ${p.leitura_suspeita ? `<div class="aviso-leitura" role="note">⚠️ ${esc(avisoLeituraSuspeita(p))}</div>` : ''}
           </div>
           <div class="cfoot">
             <span class="lck">Verificado: ${agora}</span>

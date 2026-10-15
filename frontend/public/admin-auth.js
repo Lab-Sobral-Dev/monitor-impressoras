@@ -68,6 +68,17 @@ function motivoSemDados(p) {
   }
 }
 
+// Nível parado há semanas apesar de muitas páginas impressas: o valor exibido
+// provavelmente não é real (tinta compatível/a granel, chip que não informa consumo)
+function avisoLeituraSuspeita(p) {
+  const r = p.leitura_suspeita;
+  if (!r) return '';
+  const valores = [...new Set(Object.values(r.niveis))];
+  const nivel = valores.length === 1 ? `em ${valores[0]}%` : 'nos mesmos valores';
+  return `Leitura não confiável: nível parado ${nivel} há ${r.dias} dias, com ${Number(r.paginas).toLocaleString('pt-BR')} páginas impressas. ` +
+         'Provavelmente tinta compatível/a granel ou chip que não informa o consumo — confira no painel da impressora.';
+}
+
 // Interface web só faz sentido quando há algo respondendo no IP
 function temInterfaceWeb(p) {
   const s = situacaoImpressora(p);
