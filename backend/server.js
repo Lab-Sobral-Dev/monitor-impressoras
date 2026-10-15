@@ -494,46 +494,102 @@ function obterNiveisBrother(ip, comunidade) {
     });
 }
 
-function obterDadosSNMP(ip, comunidade) {
-    return new Promise((resolve) => {
-        const session = snmp.createSession(ip, comunidade || 'public', { timeout: 1500, retries: 0 });
-        const oids = [
-            '1.3.6.1.2.1.43.11.1.1.8.1.1', '1.3.6.1.2.1.43.11.1.1.9.1.1',
-            '1.3.6.1.2.1.43.11.1.1.8.1.2', '1.3.6.1.2.1.43.11.1.1.9.1.2',
-            '1.3.6.1.2.1.43.11.1.1.8.1.3', '1.3.6.1.2.1.43.11.1.1.9.1.3',
-            '1.3.6.1.2.1.43.11.1.1.8.1.4', '1.3.6.1.2.1.43.11.1.1.9.1.4'
-        ];
-        session.get(oids, async (error, varbinds) => {
-            session.close();
-            if (error) { resolve({ online: false, suprimentos: [] }); return; }
-            const cores = ['Preto', 'Ciano', 'Magenta', 'Amarelo'];
-            const suprimentos = [];
-            for (let i = 0; i < cores.length; i++) {
-                const vbMax  = varbinds[i * 2];
-                const vbAtual = varbinds[i * 2 + 1];
-                if (!vbMax || !vbAtual) continue;
-                if (snmp.isVarbindError(vbMax) || snmp.isVarbindError(vbAtual)) continue;
-                const max   = vbMax.value;
-                const atual = vbAtual.value;
-                let perc;
-                if (max > 0) {
-                    perc = Math.round((atual / max) * 100);
-                } else if (max === -2 && typeof atual === 'number' && atual >= 0) {
-                    perc = atual > 100 ? Math.round((atual / 255) * 100) : atual;
-                } else {
-                    continue;
-                }
-                suprimentos.push({ nome: cores[i], percentual: Math.max(0, Math.min(100, perc)) });
+// ── Leitura de suprimentos (Printer-MIB, RFC 3805) ────────────────────────────
+// Pergunta item a item da tabela prtMarkerSupplies (tipo, cor, máximo, nível)
+// e usa o tipo/cor que a própria impressora informa, em vez de supor pela
+// posição. Uma requisição por item: no SNMP v1 um único OID inexistente faz a
+// requisição inteira falhar (noSuchName) — pedir as 4 cores de uma vez fazia
+// impressoras monocromáticas aparecerem sempre offline.
+const OID_SUPRIMENTOS      = '1.3.6.1.2.1.43.11.1.1';   // prtMarkerSuppliesEntry
+const OID_CORANTES         = '1.3.6.1.2.1.43.12.1.1.4.1'; // prtMarkerColorantValue
+const TIPOS_TINTA_TONER    = new Set([3, 5, 6, 21]);     // toner, ink, inkCartridge, tonerCartridge
+const NOMES_COR            = [['black', 'Preto'], ['cyan', 'Ciano'], ['magenta', 'Magenta'], ['yellow', 'Amarelo']];
+const ORDEM_CORES          = NOMES_COR.map(([, nome]) => nome);
+const MAX_ITENS_SUPRIMENTO = 12;
+
+function textoSNMP(valor) {
+    return Buffer.isBuffer(valor) ? valor.toString().replace(/\0/g, '').trim() : String(valor ?? '');
+}
+
+function nomeDaCor(...textos) {
+    for (const t of textos) {
+        const achado = NOMES_COR.find(([en]) => String(t).toLowerCase().includes(en));
+        if (achado) return achado[1];
+    }
+    return null;
+}
+
+// nivel -2 = desconhecido, -3 = "há algum restante" (RFC 3805) — sem percentual
+function calcularPercentual(max, nivel) {
+    if (typeof nivel !== 'number' || nivel < 0) return null;
+    let perc;
+    if (max > 0) perc = Math.round((nivel / max) * 100);
+    else if (max === -2) perc = nivel > 100 ? Math.round((nivel / 255) * 100) : nivel;
+    else return null;
+    return Math.max(0, Math.min(100, perc));
+}
+
+// itens: [{ tipo, corante, descricao, max, nivel }]; corantes: { indice: 'black', ... }
+function interpretarSuprimentos(itens, corantes = {}) {
+    const porCor = new Map();
+    for (const item of itens) {
+        if (!TIPOS_TINTA_TONER.has(item.tipo)) continue;
+        const nome = nomeDaCor(corantes[item.corante] || '', item.descricao || '');
+        if (!nome || porCor.has(nome)) continue;
+        const percentual = calcularPercentual(item.max, item.nivel);
+        if (percentual !== null) porCor.set(nome, { nome, percentual });
+    }
+    return ORDEM_CORES.filter(c => porCor.has(c)).map(c => porCor.get(c));
+}
+
+function snmpGet(session, oids) {
+    return new Promise(resolve => session.get(oids, (erro, varbinds) => resolve({ erro, varbinds })));
+}
+
+async function lerItensSuprimento(ip, comunidade) {
+    const session = snmp.createSession(ip, comunidade || 'public', { timeout: 1000, retries: 1 });
+    try {
+        const itens = [];
+        for (let i = 1; i <= MAX_ITENS_SUPRIMENTO; i++) {
+            const col = c => `${OID_SUPRIMENTOS}.${c}.1.${i}`;
+            const { erro, varbinds } = await snmpGet(session, [col(5), col(3), col(6), col(8), col(9)]);
+            if (erro) {
+                // noSuchName = a tabela acabou (ou não existe): a impressora respondeu.
+                if (erro.name === 'RequestFailedError') break;
+                if (i === 1) return { online: false, itens: [], corantes: {} };
+                break;
             }
-            // Nenhum suprimento legível — tentar OID proprietário Brother
-            if (suprimentos.length === 0) {
-                const sups = await obterNiveisBrother(ip, comunidade);
-                resolve({ online: true, suprimentos: sups });
-                return;
-            }
-            resolve({ online: true, suprimentos });
-        });
-    });
+            if (varbinds.some(vb => snmp.isVarbindError(vb))) break;
+            const [tipo, corante, descricao, max, nivel] = varbinds.map(vb => vb.value);
+            itens.push({ tipo, corante, descricao: textoSNMP(descricao), max, nivel });
+        }
+
+        const corantes = {};
+        const indices = [...new Set(itens.map(it => it.corante).filter(c => c > 0))];
+        if (indices.length) {
+            const { erro, varbinds } = await snmpGet(session, indices.map(c => `${OID_CORANTES}.${c}`));
+            if (!erro) varbinds.forEach((vb, k) => {
+                if (!snmp.isVarbindError(vb)) corantes[indices[k]] = textoSNMP(vb.value);
+            });
+        }
+        return { online: true, itens, corantes };
+    } finally {
+        session.close();
+    }
+}
+
+async function obterDadosSNMP(ip, comunidade) {
+    try {
+        const { online, itens, corantes } = await lerItensSuprimento(ip, comunidade);
+        if (!online) return { online: false, suprimentos: [] };
+        const suprimentos = interpretarSuprimentos(itens, corantes);
+        // Nenhum nível legível pela MIB padrão — tentar OID proprietário Brother
+        if (suprimentos.length === 0) return { online: true, suprimentos: await obterNiveisBrother(ip, comunidade) };
+        return { online: true, suprimentos };
+    } catch (e) {
+        console.error(`Erro SNMP em ${ip}:`, e.message);
+        return { online: false, suprimentos: [] };
+    }
 }
 
 function obterContadorPaginas(ip, comunidade) {
@@ -1409,7 +1465,7 @@ app.use((err, req, res, next) => {
     res.status(500).json({ erro: 'Erro interno do servidor' });
 });
 
-module.exports = { app, db, dbReady, estoqueTokens, parsePageLogLine, coletarImpressoes };
+module.exports = { app, db, dbReady, estoqueTokens, parsePageLogLine, coletarImpressoes, interpretarSuprimentos };
 
 // ── Inicialização e graceful shutdown (apenas quando executado diretamente) ────
 if (require.main === module) {

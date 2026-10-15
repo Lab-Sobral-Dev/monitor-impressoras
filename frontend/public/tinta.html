@@ -281,7 +281,7 @@
                   </div>
                   <div class="bar"><div class="fill ${c} ${low ? 'low' : ''}" style="width:${s.percentual}%" role="progressbar" aria-valuenow="${s.percentual}" aria-valuemin="0" aria-valuemax="100"></div></div>
                 </div>`;
-            }).join('') : '<div class="nosnmp">Impressora offline — sem dados SNMP</div>'}
+            }).join('') : `<div class="nosnmp">${p.online ? 'A impressora não informa o nível de tinta/toner' : 'Impressora offline — sem dados SNMP'}</div>`}
           </div>
           <div class="cfoot">
             <span class="lck">Verificado: ${agora}</span>
