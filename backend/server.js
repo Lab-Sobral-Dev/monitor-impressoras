@@ -528,8 +528,10 @@ async function coletarHistorico() {
                 obterDadosSNMP(imp.ip, imp.comunidade),
                 obterContadorPaginas(imp.ip, imp.comunidade)
             ]);
+            // O contador de páginas ter respondido também prova que a impressora estava ligada
+            // (o bug antigo das monocromáticas gravava "offline" com o contador lido normalmente).
             db.run('INSERT INTO historico_status (impressora_id, online, registrado_em) VALUES (?, ?, ?)',
-                [imp.id, snmpData.online ? 1 : 0, agora]);
+                [imp.id, snmpData.online || paginas !== null ? 1 : 0, agora]);
             // Primeira leitura grava o nº de série; depois disso, série diferente = aparelho trocado
             if (!normalizarSerie(imp.numero_serie) && snmpData.serie_detectada) {
                 db.run('UPDATE impressoras SET numero_serie = ? WHERE id = ?', [snmpData.serie_detectada, imp.id]);
@@ -746,8 +748,16 @@ async function coletarImpressoes() {
 
 // ── Rotas ─────────────────────────────────────────────────────────────────────
 
+const SQL_PAINEL = 'SELECT id, nome, ip, modelo, localizacao, comunidade, tipo, material, numero_serie, conexao, estoque_modelo FROM impressoras';
+
+// Dados do painel (cache de 1 min); espera a atualização se ainda não houver
+async function painelAtual() {
+    if (!dashCache) await refreshDashCache(await consultarTodos(SQL_PAINEL));
+    return dashCache || [];
+}
+
 app.get('/api/dashboard', exigirAlgumaPermissao(['dashboard', 'estoque']), (req, res, next) => {
-    db.all('SELECT id, nome, ip, modelo, localizacao, comunidade, tipo, material, numero_serie, conexao, estoque_modelo FROM impressoras', [], async (err, rows) => {
+    db.all(SQL_PAINEL, [], async (err, rows) => {
         if (err) { console.error(err); return next(err); }
 
         const cacheValido = dashCache && Date.now() - dashCacheAt < DASH_TTL;
@@ -1160,18 +1170,18 @@ app.get('/api/descobrir', limiterDescoberta, exigirPermissao('impressoras'), asy
 // ── Error handler centralizado (deve ser o último middleware) ─────────────────
 // ── Relatórios ────────────────────────────────────────────────────────────────
 
-app.get('/api/relatorios/impressoras', exigirPermissao('relatorios'), (req, res, next) => {
-    db.all('SELECT id, nome, ip, modelo, localizacao, tipo, material, comunidade, numero_serie, conexao FROM impressoras ORDER BY nome ASC', [], async (err, rows) => {
-        if (err) return next(err);
-        const resultados = await Promise.all(rows.map(async (imp) => {
-            const [snmpData, paginas] = ehUSB(imp) ? [SEM_MONITORAMENTO, null] : await Promise.all([
-                obterDadosSNMP(imp.ip, imp.comunidade || 'public'),
-                obterContadorPaginas(imp.ip, imp.comunidade || 'public')
-            ]);
-            return { ...imp, ...snmpData, paginas_total: paginas };
-        }));
+app.get('/api/relatorios/impressoras', exigirPermissao('relatorios'), async (req, res, next) => {
+    try {
+        const painel = await painelAtual();
+        const resultados = await Promise.all(painel.map(async imp => ({
+            ...imp,
+            paginas_total: ehUSB(imp) || !imp.online ? null : await obterContadorPaginas(imp.ip, imp.comunidade || 'public')
+        })));
+        resultados.sort((a, b) => String(a.nome).localeCompare(String(b.nome)) || String(a.localizacao).localeCompare(String(b.localizacao)));
         res.json(resultados);
-    });
+    } catch (e) {
+        next(e);
+    }
 });
 
 const JANELA_PAGINAS_DIAS = { hora: 2, dia: 30, mes: 365, ano: 5 * 365 };
@@ -1216,6 +1226,8 @@ app.get('/api/relatorios/paginas/:id', exigirPermissao('relatorios'), async (req
     }
 });
 
+// Mono só tem Preto: leituras antigas de "cores" em monocromáticas eram fusor e
+// rolos lidos como Ciano/Magenta/Amarelo (bug antigo da leitura por posição).
 app.get('/api/relatorios/tinta/:id', exigirPermissao('relatorios'), (req, res, next) => {
     db.all(
         `SELECT cor,
@@ -1224,6 +1236,7 @@ app.get('/api/relatorios/tinta/:id', exigirPermissao('relatorios'), (req, res, n
                 MIN(percentual) AS percentual_min
          FROM historico_tinta
          WHERE impressora_id = ? AND coletado_em >= datetime('now', '-30 days')
+           AND (cor = 'Preto' OR (SELECT tipo FROM impressoras WHERE id = historico_tinta.impressora_id) <> 'Mono')
          GROUP BY cor, strftime('%Y-%m-%d', coletado_em, '${FUSO_HORARIO}')
          ORDER BY dia ASC, cor ASC`,
         [req.params.id], (err, rows) => {
@@ -1232,6 +1245,33 @@ app.get('/api/relatorios/tinta/:id', exigirPermissao('relatorios'), (req, res, n
         }
     );
 });
+
+// Instantes em que o contador de páginas voltou ou saltou demais: outro aparelho
+// passou a responder no IP. Map impressora_id → [{ de, ate }] (ms)
+async function momentosDeTrocaDeAparelho(dias) {
+    const linhas = await consultarTodos(
+        `SELECT impressora_id, paginas_total AS total, coletado_em AS em FROM historico_paginas
+         WHERE coletado_em >= datetime('now', ?) ORDER BY impressora_id, coletado_em`, [`-${dias + 1} days`]);
+    const trocas = new Map();
+    for (let i = 1; i < linhas.length; i++) {
+        const a = linhas[i - 1], b = linhas[i];
+        if (a.impressora_id !== b.impressora_id) continue;
+        const delta = b.total - a.total;
+        if (delta < 0 || delta > 50000) {
+            if (!trocas.has(b.impressora_id)) trocas.set(b.impressora_id, []);
+            trocas.get(b.impressora_id).push({ de: Date.parse(a.em), ate: Date.parse(b.em) });
+        }
+    }
+    return trocas;
+}
+
+// A subida de nível aconteceu no mesmo intervalo (± 1 dia) em que o aparelho mudou?
+function ehTrocaDeAparelho(trocas, impressoraId, anteriorEm, atualEm) {
+    const lista = trocas.get(impressoraId);
+    if (!lista) return false;
+    const ini = Date.parse(anteriorEm) - DIA_MS, fim = Date.parse(atualEm) + DIA_MS;
+    return lista.some(t => t.ate >= ini && t.de <= fim);
+}
 
 app.get('/api/relatorios/trocas-toner', exigirPermissao('relatorios'), (req, res, next) => {
     const diasPermitidos = new Set([7, 30, 90, 180]);
@@ -1244,7 +1284,7 @@ app.get('/api/relatorios/trocas-toner', exigirPermissao('relatorios'), (req, res
          JOIN impressoras i ON i.id = h.impressora_id
          WHERE h.coletado_em >= datetime('now', ?)
          ORDER BY h.impressora_id ASC, h.cor ASC, h.coletado_em ASC`,
-        [`-${dias} days`], (err, rows) => {
+        [`-${dias} days`], async (err, rows) => {
             if (err) return next(err);
             const grupos = new Map();
             for (const row of rows) {
@@ -1253,6 +1293,8 @@ app.get('/api/relatorios/trocas-toner', exigirPermissao('relatorios'), (req, res
                 grupos.get(key).push(row);
             }
             const eventos = [];
+            let trocasDeAparelho;
+            try { trocasDeAparelho = await momentosDeTrocaDeAparelho(dias); } catch (e) { return next(e); }
             for (const pontos of grupos.values()) {
                 for (let i = 1; i < pontos.length; i++) {
                     const anterior = Number(pontos[i - 1].percentual || 0);
@@ -1260,6 +1302,7 @@ app.get('/api/relatorios/trocas-toner', exigirPermissao('relatorios'), (req, res
                     const diferenca = atual - anterior;
                     if (diferenca >= 35 && atual >= 60) {
                         const p = pontos[i];
+                        if (ehTrocaDeAparelho(trocasDeAparelho, p.impressora_id, pontos[i - 1].coletado_em, p.coletado_em)) continue;
                         eventos.push({
                             id: `auto-${p.impressora_id}-${p.cor}-${p.coletado_em}`,
                             origem: 'automatica',

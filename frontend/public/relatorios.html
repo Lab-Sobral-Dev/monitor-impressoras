@@ -441,13 +441,18 @@
       html += '<div class="ficha-item"><div class="ficha-label">Status</div><div class="ficha-val ' + (imp.online?'ok':estaOffline(imp)?'no':semLeituraSNMP(imp)?'wn':'') + '" title="' + escHTML(motivoSemDados(imp)) + '">' + rotuloSituacao(imp) + '</div></div>';
       html += '<div class="ficha-item"><div class="ficha-label">P&aacute;ginas (total)</div><div class="ficha-val">' + (imp.paginas_total!=null ? Number(imp.paginas_total).toLocaleString('pt-BR') : '&mdash;') + '</div></div>';
       html += '</div>';
+      // Mesmos avisos do painel: leitura não confiável, nível não informado, sem resposta
+      if (imp.leitura_suspeita) html += '<div class="aviso-leitura" role="note" style="margin-bottom:14px">⚠️ ' + escHTML(avisoLeituraSuspeita(imp)) + '</div>';
       if (sups.length) {
         html += '<div class="chart-wrap"><div class="chart-title">Suprimentos atuais</div><div class="sup-bars">';
         sups.forEach(s => {
-          html += '<div class="srow"><div class="smeta"><span>' + escHTML(s.nome) + '</span><span class="pct ' + pClass(s.percentual) + '">' + s.percentual + '%</span></div>';
+          const prev = textoPrevisao(imp, s.nome);
+          html += '<div class="srow"><div class="smeta"><span>' + escHTML(s.nome) + '</span><span class="pct ' + pClass(s.percentual) + '">' + (prev ? '<small class="iprev">' + escHTML(prev) + ' · </small>' : '') + s.percentual + '%</span></div>';
           html += '<div class="bar"><div class="fill ' + corC(s.nome) + '" style="width:' + s.percentual + '%" role="progressbar"></div></div></div>';
         });
-        html += '</div></div>';
+        html += '</div>' + linhaEstoque(imp) + '</div>';
+      } else {
+        html += '<div class="empty-state" style="padding:18px">' + escHTML(motivoSemDados(imp)) + '</div>';
       }
       div.innerHTML = html;
     } catch(e) { div.innerHTML = '<div class="empty-state">Erro ao carregar dados.</div>'; }
@@ -1062,13 +1067,16 @@
       '<div><span>Localização</span><strong>' + escHTML(imp.localizacao || '-') + '</strong></div>' +
       '</div>';
     const sups = Array.isArray(imp.suprimentos) ? imp.suprimentos : [];
+    if (imp.leitura_suspeita) html += '<p><strong>Atenção:</strong> ' + escHTML(avisoLeituraSuspeita(imp)) + '</p>';
     if (sups.length) {
       html += barrasHorizontais(sups.map(s => ({
         label: s.nome,
         value: Number(s.percentual || 0),
-        display: Number(s.percentual || 0) + '%',
+        display: Number(s.percentual || 0) + '%' + (textoPrevisao(imp, s.nome) ? ' (' + textoPrevisao(imp, s.nome) + ')' : ''),
         color: corHex(s.nome)
       })), { max:100 });
+    } else {
+      html += '<p>' + escHTML(motivoSemDados(imp)) + '</p>';
     }
     return { titulo:'Ficha técnica — ' + nomeImp(id), html };
   }

@@ -9,6 +9,11 @@
 //      o mesmo setor não apareça duas vezes nos filtros e agrupamentos
 //   6. Apaga do estoque o grupo antigo "Canon GX7010" — as Canon GX usam o grupo
 //      "Canon GX6010 / GX7010"; o antigo não aparecia em tela nenhuma (decisão de 15/10/2026)
+//   7. Histórico de status: coletas gravadas como "offline" em que o contador de páginas
+//      foi lido viram "online" — o bug antigo das monocromáticas (HPs, Kyocera) gravava
+//      offline com a impressora respondendo, e a disponibilidade delas aparecia ~6%
+//   8. Histórico de tinta: apaga as "cores" das impressoras monocromáticas (eram fusor e
+//      rolos da Samsung lidos como Ciano/Magenta/Amarelo pelo bug antigo)
 //
 // Rodar DEPOIS de subir a versão com nº de série e conexão USB (o servidor cria
 // as colunas numero_serie e conexao ao iniciar).
@@ -125,6 +130,34 @@ async function main() {
             console.log(`→ Estoque "${grupo}": apagar ${itens.map(i => `${i.insumo} ${i.quantidade}${i.estado && i.estado !== 'Novo' ? ` (${i.estado})` : ''}`).join(', ')}`);
             alteradas += itens.length;
             await run('DELETE FROM estoque WHERE modelo = ?', [grupo]);
+        }
+
+        // 7. Status: contador de páginas lido na mesma coleta = impressora respondendo
+        const statusErrado = await all(
+            `SELECT i.localizacao, i.ip, COUNT(*) AS n FROM historico_status s JOIN impressoras i ON i.id = s.impressora_id
+             WHERE s.online = 0 AND EXISTS (SELECT 1 FROM historico_paginas p
+                   WHERE p.impressora_id = s.impressora_id AND p.coletado_em = s.registrado_em)
+             GROUP BY s.impressora_id ORDER BY n DESC`);
+        if (!statusErrado.length) console.log('· Histórico de status: nada a corrigir');
+        else {
+            console.log(`→ Histórico de status: ${statusErrado.reduce((a, r) => a + r.n, 0)} coletas "offline" com contador lido viram "online" ` +
+                `(${statusErrado.map(r => `${r.localizacao} ${r.n}`).join(', ')})`);
+            alteradas += statusErrado.reduce((a, r) => a + r.n, 0);
+            await run(`UPDATE historico_status SET online = 1 WHERE online = 0 AND EXISTS (SELECT 1 FROM historico_paginas p
+                       WHERE p.impressora_id = historico_status.impressora_id AND p.coletado_em = historico_status.registrado_em)`);
+        }
+
+        // 8. Tinta: monocromática só tem Preto (o resto era fusor/rolos lidos como cor)
+        const coresFalsas = await all(
+            `SELECT i.localizacao, i.ip, COUNT(*) AS n FROM historico_tinta h JOIN impressoras i ON i.id = h.impressora_id
+             WHERE i.tipo = 'Mono' AND h.cor <> 'Preto' GROUP BY h.impressora_id`);
+        if (!coresFalsas.length) console.log('· Histórico de tinta: nenhuma cor falsa em monocromática');
+        else {
+            console.log(`→ Histórico de tinta: apagar ${coresFalsas.reduce((a, r) => a + r.n, 0)} leituras de "cor" em monocromáticas ` +
+                `(${coresFalsas.map(r => `${r.localizacao} ${r.ip} ${r.n}`).join(', ')})`);
+            alteradas += coresFalsas.reduce((a, r) => a + r.n, 0);
+            await run(`DELETE FROM historico_tinta WHERE cor <> 'Preto'
+                       AND impressora_id IN (SELECT id FROM impressoras WHERE tipo = 'Mono')`);
         }
 
         await run(APLICAR ? 'COMMIT' : 'ROLLBACK');
