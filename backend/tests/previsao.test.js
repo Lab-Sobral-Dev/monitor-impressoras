@@ -2,7 +2,7 @@
 'use strict';
 
 // Previsão de quando a tinta/toner acaba, a partir do histórico de níveis
-const { preverFimDosSuprimentos, db, dbReady } = require('../server');
+const { preverFimDosSuprimentos, previsaoAindaValida, db, dbReady } = require('../server');
 
 afterAll(() => dbReady.then(() => new Promise(resolve => db.close(resolve))));
 
@@ -47,5 +47,25 @@ describe('preverFimDosSuprimentos', () => {
     it('calcula cada cor separadamente', () => {
         const tinta = [...serie('Preto', 14, d => 30 + d), ...serie('Ciano', 14, () => 70)];
         expect(preverFimDosSuprimentos(tinta, AGORA)).toEqual({ Preto: 30 });
+    });
+});
+
+describe('previsaoAindaValida', () => {
+    const previsao = { Preto: 2, Ciano: 40 };
+    const niveis = { Preto: 4, Ciano: 50 };
+
+    it('mantém a previsão enquanto o nível ao vivo não subiu', () => {
+        const ao_vivo = [{ nome: 'Preto', percentual: 3 }, { nome: 'Ciano', percentual: 50 }];
+        expect(previsaoAindaValida(previsao, niveis, ao_vivo)).toEqual({ Preto: 2, Ciano: 40 });
+    });
+
+    it('descarta a cor cujo cartucho foi trocado depois da última coleta', () => {
+        const ao_vivo = [{ nome: 'Preto', percentual: 100 }, { nome: 'Ciano', percentual: 49 }];
+        expect(previsaoAindaValida(previsao, niveis, ao_vivo)).toEqual({ Ciano: 40 });
+    });
+
+    it('sem cores válidas devolve null', () => {
+        expect(previsaoAindaValida(previsao, niveis, [{ nome: 'Preto', percentual: 98 }])).toBeNull();
+        expect(previsaoAindaValida(previsao, niveis, [])).toBeNull();
     });
 });

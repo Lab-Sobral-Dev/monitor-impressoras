@@ -94,7 +94,7 @@
       <button class="fb"     id="b-on"  onclick="setF('on')">Online</button>
       <button class="fb"     id="b-off" onclick="setF('off')">Offline</button>
       <button class="fb"     id="b-low" onclick="setF('low')">Tinta Baixa</button>
-      <button class="fb" id="btn-refresh" style="margin-left:auto" onclick="carregar()">Atualizar</button>
+      <button class="fb" id="btn-refresh" style="margin-left:auto" onclick="carregar(true)">Atualizar</button>
     </div>
 
     <div class="grid" id="grid"></div>
@@ -120,8 +120,6 @@
     return 'def';
   }
 
-  function pClass(v) { return v <= 10 ? 'cr' : v <= 25 ? 'wn' : ''; }
-  function tBaixa(s) { return (s || []).some(x => x.percentual <= 15); }
 
   function setF(f) {
     filtroAtivo = f;
@@ -136,18 +134,19 @@
       if (!txt.includes(q)) return false;
       if (filtroAtivo === 'on')  return p.online;
       if (filtroAtivo === 'off') return estaOffline(p);
-      if (filtroAtivo === 'low') return tBaixa(p.suprimentos);
+      if (filtroAtivo === 'low') return tintaCritica(p);
       return true;
     });
   }
 
-  async function carregar() {
+  // forcar = lê as impressoras de novo (botão); o timer usa a última leitura do servidor
+  async function carregar(forcar = false) {
     const btn = document.getElementById('btn-refresh');
     btn.disabled = true;
     btn.textContent = 'Atualizando...';
     document.getElementById('loader').classList.add('show');
     try {
-      const res = await fetch('/api/dashboard', { headers: authHeaders() });
+      const res = await fetch('/api/dashboard' + (forcar ? '?atualizar=1' : ''), { headers: authHeaders() });
       if (!res.ok) throw new Error('HTTP ' + res.status);
       dadosCache = await res.json();
       renderizar();
@@ -165,12 +164,11 @@
   function renderizar() {
     const lista = dadosFiltrados();
     const grid  = document.getElementById('grid');
-    const agora = new Date().toLocaleTimeString('pt-BR');
 
     document.getElementById('tot').textContent = dadosCache.length;
     document.getElementById('onl').textContent = dadosCache.filter(p => p.online).length;
     document.getElementById('ofl').textContent = dadosCache.filter(estaOffline).length;
-    document.getElementById('low').textContent = dadosCache.filter(p => tBaixa(p.suprimentos)).length;
+    document.getElementById('low').textContent = dadosCache.filter(tintaCritica).length;
 
     if (!lista.length) {
       const q = (document.getElementById('si').value || '').trim();
@@ -186,14 +184,14 @@
 
     grid.innerHTML = lista.map(p => {
       const sup   = Array.isArray(p.suprimentos) ? p.suprimentos : [];
-      const baixa = tBaixa(sup);
+      const baixa = tintaCritica(p);
       return `
         <div class="card ${p.online ? 'is-on' : estaOffline(p) ? 'is-off' : ''}">
           <div class="ch">
             <div>
               <div class="pname">${esc(p.nome)}</div>
               <div class="pip">${esc(enderecoImpressora(p))}</div>
-              <div class="pmod">${esc(p.modelo || 'Canon')}</div>
+              <div class="pmod">${esc(p.modelo || '')}</div>
               ${p.localizacao ? `<div class="ploc">📍 ${esc(p.localizacao)}</div>` : ''}
             </div>
             ${seloSituacao(p, { online: '● CONECTADO', offline: '● SEM SINAL' })}
@@ -203,16 +201,17 @@
               <div class="srow">
                 <div class="smeta">
                   <span>${esc(s.nome)}</span>
-                  <span class="pct ${pClass(s.percentual)}">${textoPrevisao(p, s.nome) ? `<small class="iprev">${textoPrevisao(p, s.nome)} · </small>` : ''}${s.percentual}%</span>
+                  <span class="pct ${classeNivel(s.percentual)}">${textoPrevisao(p, s.nome) ? `<small class="iprev">${textoPrevisao(p, s.nome)} · </small>` : ''}${s.percentual}%</span>
                 </div>
                 <div class="bar"><div class="fill ${corC(s.nome)}" style="width:${s.percentual}%" role="progressbar" aria-valuenow="${s.percentual}" aria-valuemin="0" aria-valuemax="100"></div></div>
               </div>`).join('') : `<div class="nosnmp">${esc(motivoSemDados(p))}</div>`}
           </div>
           ${baixa ? '<div class="alert-low" role="alert">Tinta crítica — verificar reposição</div>' : ''}
+          ${avisoSuprimentoParcial(p) ? `<div class="aviso-leitura" role="note">ℹ️ ${esc(avisoSuprimentoParcial(p))}</div>` : ''}
           ${p.leitura_suspeita ? `<div class="aviso-leitura" role="note">⚠️ ${esc(avisoLeituraSuspeita(p))}</div>` : ''}
           ${linhaEstoque(p)}
           <div class="cf">
-            <span class="lck">Verificado: ${agora}</span>
+            <span class="lck">Lida às ${horaLeitura(p)}</span>
             ${temInterfaceWeb(p)
               ? `<a class="btr" href="http://${esc(p.ip)}" target="_blank" rel="noopener">Interface Remota</a>`
               : `<span style="font-size:11px;color:var(--mt)">${ehUSB(p) ? 'USB' : 'Sem conexão'}</span>`}

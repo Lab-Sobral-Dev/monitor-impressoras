@@ -16,8 +16,8 @@ const {
 } = require('./lib/leitura-impressora');
 const { gerarPDF } = require('./lib/pdf');
 const {
-    DIA_MS, detectarLeituraParada, preverFimDosSuprimentos, consumoDiarioPorImpressora, paginasPorPeriodo,
-    horasDoExpediente
+    DIA_MS, detectarLeituraParada, preverFimDosSuprimentos, ultimosNiveis, previsaoAindaValida,
+    consumoDiarioPorImpressora, paginasPorPeriodo, horasDoExpediente
 } = require('./lib/analise-historico');
 
 // Fuso dos relatórios (dias, horas e expediente): Fortaleza = -3
@@ -137,6 +137,7 @@ let dashCache     = null;
 let dashCacheAt   = 0;
 let dashRefreshing = null; // Promise da atualização em andamento
 const DASH_TTL    = 60_000;
+const DASH_MIN_RELEITURA = 15_000;
 
 function invalidarCacheDash() {
     dashCache = null;
@@ -158,6 +159,7 @@ async function atualizarDashCache(rows) {
         return {
             ...imp, material: imp.material || 'Toner', tipo: imp.tipo || 'Colorido', ...snmpData,
             aparelho_divergente: serieDivergente(imp.numero_serie, snmpData.serie_detectada),
+            lido_em: new Date().toISOString(),
             leitura_suspeita: leituraSuspeitaAtual(imp.id, snmpData),
             previsao_dias: previsaoAtual(imp.id, snmpData),
             estoque_modelo_efetivo: grupoEstoque,
@@ -607,7 +609,7 @@ async function atualizarLeiturasParadas() {
             if (parada) resultado.set(id, parada);
             // Nível parado não serve para prever consumo
             const previsao = parada ? {} : preverFimDosSuprimentos(tinta.map(emMs));
-            if (Object.keys(previsao).length) novasPrevisoes.set(id, previsao);
+            if (Object.keys(previsao).length) novasPrevisoes.set(id, { dias: previsao, niveis: ultimosNiveis(tinta.map(emMs)) });
         }
         leiturasParadas = resultado;
         previsoesSuprimento = novasPrevisoes;
@@ -621,14 +623,13 @@ async function atualizarLeiturasParadas() {
 // linear do percentual no tempo. Só prevê com pelo menos PREVISAO_MIN_DIAS de
 // dados e queda mínima, para não extrapolar ruído (regras em lib/analise-historico.js).
 
-let previsoesSuprimento = new Map(); // impressora_id → { cor: dias restantes }
+let previsoesSuprimento = new Map(); // impressora_id → { dias: { cor: dias restantes }, niveis: { cor: último nível gravado } }
 
-// Só vale enquanto o nível ao vivo é o mesmo da última coleta (ou menor)
+// Só vale enquanto o nível ao vivo não subiu desde a última coleta (troca de cartucho)
 function previsaoAtual(impressoraId, snmpData) {
     const previsao = previsoesSuprimento.get(impressoraId);
     if (!previsao || !snmpData.online) return null;
-    const cores = (snmpData.suprimentos || []).filter(s => previsao[s.nome] !== undefined);
-    return cores.length ? Object.fromEntries(cores.map(s => [s.nome, previsao[s.nome]])) : null;
+    return previsaoAindaValida(previsao.dias, previsao.niveis, snmpData.suprimentos);
 }
 
 // Só vale se a leitura ao vivo continua exatamente nos níveis parados
@@ -761,6 +762,17 @@ app.get('/api/dashboard', exigirAlgumaPermissao(['dashboard', 'estoque']), (req,
         if (err) { console.error(err); return next(err); }
 
         const cacheValido = dashCache && Date.now() - dashCacheAt < DASH_TTL;
+
+        // ?atualizar=1 (botão "Atualizar agora"): lê as impressoras de novo — salvo
+        // se a última leitura tem menos de DASH_MIN_RELEITURA, para não sobrecarregar a rede
+        if (req.query.atualizar === '1' && Date.now() - dashCacheAt >= DASH_MIN_RELEITURA) {
+            try {
+                await refreshDashCache(rows);
+                return res.json(dashCache || []);
+            } catch (e) {
+                return next(e);
+            }
+        }
 
         if (cacheValido) {
             res.json(dashCache);
@@ -1475,7 +1487,7 @@ app.use((err, req, res, next) => {
 });
 
 module.exports = { app, db, dbReady, parsePageLogLine, coletarImpressoes, interpretarSuprimentos, serieDivergente, verificarPresencaNaRede, interpretarConsumiveisHP, interpretarSuprimentosHPWeb,
-    detectarLeituraParada, atualizarLeiturasParadas, limparHistoricoAntigo, horasDoExpediente, preverFimDosSuprimentos, modeloDeEstoque };
+    detectarLeituraParada, atualizarLeiturasParadas, limparHistoricoAntigo, horasDoExpediente, preverFimDosSuprimentos, previsaoAindaValida, modeloDeEstoque };
 
 // ── Inicialização e graceful shutdown (apenas quando executado diretamente) ────
 if (require.main === module) {

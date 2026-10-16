@@ -133,7 +133,6 @@
   initUserLabel(); initClock(); setActiveNav();
 
   const esc = t => String(t ?? '').replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'})[m]);
-  const tBaixa = p => (p.suprimentos || []).some(s => s.percentual <= 15);
 
   function abrirAlerta(el) {
     const d = JSON.parse(decodeURIComponent(el.dataset.alerta));
@@ -159,9 +158,9 @@
       document.getElementById('stat-total').textContent   = dash.length;
       document.getElementById('stat-online').textContent  = dash.filter(p => p.online).length;
       document.getElementById('stat-offline').textContent = dash.filter(estaOffline).length;
-      document.getElementById('stat-baixa').textContent   = dash.filter(p => p.online && tBaixa(p)).length;
+      document.getElementById('stat-baixa').textContent   = dash.filter(tintaCritica).length;
 
-      const alertas   = dash.filter(p => estaOffline(p) || semLeituraSNMP(p) || (p.online && tBaixa(p)) || p.aparelho_divergente || p.leitura_suspeita || previsoesProximas(p).length);
+      const alertas   = dash.filter(p => estaOffline(p) || semLeituraSNMP(p) || tintaCritica(p) || p.aparelho_divergente || p.leitura_suspeita || previsoesProximas(p).length);
       const alertasEl = document.getElementById('alertas-body');
       if (!alertas.length) {
         alertasEl.innerHTML = '<div class="alert-ok">✓ Tudo funcionando normalmente</div>';
@@ -181,8 +180,8 @@
           if (acabando.length) {
             motivos.push('Previsão: ' + acabando.map(([cor, dias]) => `${cor} ${textoPrevisao(p, cor)}`).join(', '));
           }
-          if (p.online && tBaixa(p)) {
-            const cores = (p.suprimentos||[]).filter(s=>s.percentual<=15).map(s=>s.nome+' '+s.percentual+'%').join(', ');
+          if (tintaCritica(p)) {
+            const cores = coresCriticas(p).map(s=>s.nome+' '+s.percentual+'%').join(', ');
             motivos.push('Tinta crítica: ' + cores);
           }
           const semEstoque = p.online ? semReposicao(p) : [];

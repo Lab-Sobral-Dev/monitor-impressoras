@@ -51,6 +51,8 @@ function obterNiveisBrother(ip, comunidade) {
                 const nome = Object.entries(NOME_MAP).find(([k]) => descRaw.includes(k))?.[1];
                 if (nome) suprimentos.push({ nome, percentual: percMap[i] });
             }
+            // Mesma ordem das outras marcas (Preto, Ciano, Magenta, Amarelo)
+            suprimentos.sort((a, b) => ORDEM_CORES.indexOf(a.nome) - ORDEM_CORES.indexOf(b.nome));
             resolve(suprimentos);
         });
     });

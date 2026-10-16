@@ -85,6 +85,26 @@ function preverFimDosSuprimentos(tinta, agora = Date.now()) {
     return previsao;
 }
 
+// Último nível gravado de cada cor. tinta: [{ cor, percentual, em (ms) }] → { Preto: 40, ... }
+function ultimosNiveis(tinta) {
+    const ultimos = {};
+    const quando = {};
+    for (const t of tinta) {
+        if (quando[t.cor] === undefined || t.em > quando[t.cor]) { quando[t.cor] = t.em; ultimos[t.cor] = t.percentual; }
+    }
+    return ultimos;
+}
+
+// Previsão calculada na última coleta, só para as cores lidas agora cujo nível
+// não subiu desde então — subiu = cartucho trocado/recarregado depois da coleta,
+// e a previsão antiga ("acaba em ~2 dias") não vale para o novo.
+// previsao: { Preto: 12 }; niveis: { Preto: 30 }; suprimentos: [{ nome, percentual }]
+function previsaoAindaValida(previsao, niveis, suprimentos) {
+    const cores = (suprimentos || []).filter(s => previsao?.[s.nome] !== undefined
+        && !(s.percentual > (niveis?.[s.nome] ?? 100) + PREVISAO_SUBIDA_TROCA));
+    return cores.length ? Object.fromEntries(cores.map(s => [s.nome, previsao[s.nome]])) : null;
+}
+
 // Estoque × consumo: para cada item do estoque, soma o consumo (pontos
 // percentuais por dia) das impressoras abastecidas por aquele grupo — antes
 // somava qualquer impressora da mesma cor, de qualquer modelo. Uma unidade em
@@ -160,6 +180,8 @@ module.exports = {
     DIA_MS,
     detectarLeituraParada,
     preverFimDosSuprimentos,
+    ultimosNiveis,
+    previsaoAindaValida,
     consumoDiarioPorImpressora,
     paginasPorPeriodo,
     chavePeriodo,

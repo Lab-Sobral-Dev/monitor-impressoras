@@ -126,12 +126,12 @@
   <div class="main-topbar">
     <span class="main-title">🖨️ Níveis de Tinta</span>
     <div style="display:flex;align-items:center;gap:14px">
-      <button id="btn-atualizar" class="btn-atualizar" onclick="carregar()">Atualizar Agora</button>
+      <button id="btn-atualizar" class="btn-atualizar" onclick="carregar(true)">Atualizar Agora</button>
       <span id="clock" class="main-clock"></span>
     </div>
   </div>
   <main class="main-content">
-    <div class="ph-sub">Níveis consultados em tempo real via SNMP · Atualiza a cada 30s</div>
+    <div class="ph-sub">Níveis lidos das impressoras pela rede · Atualiza sozinho a cada minuto — "Atualizar Agora" lê de novo na hora</div>
     <div class="lupd"><div class="dot" aria-hidden="true"></div><span id="lupd">Aguardando...</span></div>
 
     <div class="filter-bar">
@@ -148,7 +148,7 @@
     <div class="grid" id="grid"></div>
 
     <div class="refresh-row">
-      <button class="btn-refresh" id="btn-refresh" onclick="carregar()">
+      <button class="btn-refresh" id="btn-refresh" onclick="carregar(true)">
         <span id="rspin"></span> Verificar todos os níveis agora
       </button>
     </div>
@@ -172,8 +172,6 @@
     return 'black';
   }
 
-  function pClass(v) { return v <= 10 ? 'cr' : v <= 25 ? 'wn' : 'ok'; }
-  function tBaixa(s) { return (s || []).some(x => x.percentual <= 15); }
 
   function setFiltro(f) {
     filtroAtivo = f;
@@ -192,11 +190,12 @@
     rs.className   = carregando ? 'spin' : '';
   }
 
-  async function carregar() {
+  // forcar = lê as impressoras de novo (botões); o timer usa a última leitura do servidor
+  async function carregar(forcar = false) {
     setBotoes(true);
     document.getElementById('loader').classList.add('show');
     try {
-      const res = await fetch('/api/dashboard', { headers: authHeaders() });
+      const res = await fetch('/api/dashboard' + (forcar ? '?atualizar=1' : ''), { headers: authHeaders() });
       if (!res.ok) throw new Error('HTTP ' + res.status);
       dadosCache = await res.json();
       renderizar();
@@ -213,9 +212,7 @@
 
   function renderizar() {
     const g     = document.getElementById('grid');
-    const agora = new Date().toLocaleTimeString('pt-BR');
-
-    const criticos = dadosCache.filter(p => p.online && tBaixa(p.suprimentos));
+    const criticos = dadosCache.filter(tintaCritica);
     const ab = document.getElementById('alertbox');
     const am = document.getElementById('alertmsg');
     const ai = document.getElementById('alertitems');
@@ -223,8 +220,7 @@
       ab.style.display = 'block';
       am.textContent = criticos.length + ' impressora(s) com tinta crítica — clique para localizar';
       ai.innerHTML = criticos.map(p => {
-        const coresBaixas = (p.suprimentos || [])
-          .filter(s => s.percentual <= 15)
+        const coresBaixas = coresCriticas(p)
           .map(s => `${s.nome} ${s.percentual}%`)
           .join(' · ');
         const setor = p.localizacao || enderecoImpressora(p);
@@ -256,14 +252,14 @@
 
     g.innerHTML = lista.map(p => {
       const sup   = Array.isArray(p.suprimentos) ? p.suprimentos : [];
-      const baixa = tBaixa(sup);
+      const baixa = tintaCritica(p);
       return `
         <div class="card ${baixa ? 'crit' : ''}" id="card-${p.id}">
           <div class="ctop">
             <div>
               <div class="pname">${esc(p.nome)}</div>
               <div class="pip">${esc(enderecoImpressora(p))}</div>
-              <div class="pmod">${esc(p.modelo || 'Canon')}</div>
+              <div class="pmod">${esc(p.modelo || '')}</div>
               ${p.localizacao ? `<div class="ploc">📍 ${esc(p.localizacao)}</div>` : ''}
             </div>
             ${seloSituacao(p)}
@@ -271,8 +267,8 @@
           <div class="inks">
             ${sup.length ? sup.map(s => {
               const c   = corC(s.nome);
-              const cls = pClass(s.percentual);
-              const low = s.percentual <= 15;
+              const cls = classeNivel(s.percentual);
+              const low = s.percentual <= NIVEL_CRITICO;
               return `
                 <div class="irow">
                   <div class="imeta">
@@ -282,11 +278,12 @@
                   <div class="bar"><div class="fill ${c} ${low ? 'low' : ''}" style="width:${s.percentual}%" role="progressbar" aria-valuenow="${s.percentual}" aria-valuemin="0" aria-valuemax="100"></div></div>
                 </div>`;
             }).join('') : `<div class="nosnmp">${esc(motivoSemDados(p))}</div>`}
+            ${avisoSuprimentoParcial(p) ? `<div class="aviso-leitura" role="note">ℹ️ ${esc(avisoSuprimentoParcial(p))}</div>` : ''}
             ${p.leitura_suspeita ? `<div class="aviso-leitura" role="note">⚠️ ${esc(avisoLeituraSuspeita(p))}</div>` : ''}
             ${linhaEstoque(p)}
           </div>
           <div class="cfoot">
-            <span class="lck">Verificado: ${agora}</span>
+            <span class="lck">Lida às ${horaLeitura(p)}</span>
             ${temInterfaceWeb(p) ? `<a class="btr" href="http://${esc(p.ip)}" target="_blank" rel="noopener">Abrir Interface</a>` : ''}
           </div>
         </div>`;

@@ -79,6 +79,37 @@ function avisoLeituraSuspeita(p) {
          'Provavelmente tinta compatível/a granel ou chip que não informa o consumo — confira no painel da impressora.';
 }
 
+// Faixas de nível usadas em todas as telas: até 15% = crítico (alerta), até 25% = baixo
+const NIVEL_CRITICO = 15;
+const NIVEL_BAIXO   = 25;
+
+function classeNivel(v) {
+  return v <= NIVEL_CRITICO ? 'cr' : v <= NIVEL_BAIXO ? 'wn' : 'ok';
+}
+
+// Cores em nível crítico. Leitura não confiável (nível parado) não gera alerta
+// de tinta crítica — o aviso de leitura não confiável já aparece no lugar.
+function coresCriticas(p) {
+  if (!p.online || p.leitura_suspeita) return [];
+  return (p.suprimentos || []).filter(s => s.percentual <= NIVEL_CRITICO);
+}
+
+function tintaCritica(p) {
+  return coresCriticas(p).length > 0;
+}
+
+// Aviso sobre cor sem nível quando outras cores foram lidas (sem nenhuma cor,
+// o aviso já aparece como motivoSemDados)
+function avisoSuprimentoParcial(p) {
+  return p.online && p.aviso_suprimento && (p.suprimentos || []).length ? p.aviso_suprimento : '';
+}
+
+// Hora em que a impressora foi lida pela última vez
+function horaLeitura(p) {
+  const d = p.lido_em ? new Date(p.lido_em) : null;
+  return d && !isNaN(d) ? d.toLocaleTimeString('pt-BR') : '—';
+}
+
 // Previsão de fim da cor (calculada pelo consumo desde a última troca)
 function textoPrevisao(p, cor) {
   const dias = p.previsao_dias?.[cor];
@@ -110,7 +141,7 @@ function linhaEstoque(p) {
 // Cores acabando (≤15% ou previsão ≤7 dias) sem nenhuma unidade para repor
 function semReposicao(p) {
   const acabando = new Set([
-    ...(p.suprimentos || []).filter(s => s.percentual <= 15).map(s => s.nome),
+    ...coresCriticas(p).map(s => s.nome),
     ...previsoesProximas(p).map(([cor]) => cor)
   ]);
   return [...acabando].filter(cor => estoqueDaCor(p, cor) === 0);
