@@ -20,6 +20,7 @@
     .btn-print:hover { background: var(--ok); color: #fff; }
     .btn-tinta { background: rgba(251,102,2,.08); border: 1px solid rgba(251,102,2,.25); color: var(--accent); padding: 4px 10px; border-radius: 5px; font-size: 11px; font-weight: 600; text-decoration: none; transition: all .2s; }
     .btn-tinta:hover { background: var(--accent); color: #fff; }
+    #modalEdit .modal { max-height: 90vh; overflow-y: auto; }
   </style>
 </head>
 <body>
@@ -48,6 +49,18 @@
     <datalist id="listaEstoque"></datalist>
     <span class="modal-label">Localização</span>
     <input type="text" id="editLocalizacao" class="modal-input" placeholder="Ex: 2º Andar - Sala 201">
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:0 10px">
+      <div>
+        <span class="modal-label">Tipo</span>
+        <select id="editTipo" class="modal-input"><option value="Colorido">Colorido (CMYK)</option><option value="Mono">Apenas Preto</option><option value="Manutencao">Caixa Manutenção</option></select>
+      </div>
+      <div>
+        <span class="modal-label">Material</span>
+        <select id="editMaterial" class="modal-input"><option value="Tinta">Tinta</option><option value="Toner">Toner</option></select>
+      </div>
+    </div>
+    <span class="modal-label">Comunidade SNMP</span>
+    <input type="text" id="editComunidade" class="modal-input" maxlength="64" placeholder="public">
     <div class="modal-actions">
       <button class="btn-cancel" onclick="document.getElementById('modalEdit').classList.remove('open')">Cancelar</button>
       <button class="btn-save" onclick="salvarEdicao()">Salvar alterações</button>
@@ -202,7 +215,7 @@
         <td style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
           ${ehUSB(p) ? '' : `<a class="btn-tinta" href="http://${esc(p.ip)}" target="_blank" rel="noopener">🔗 Interface</a>
           <button class="btn-print" data-id="${p.id}" data-nome="${esc(p.modelo||'Impressora')}" onclick="abrirImpressao(this)">▶ Imprimir</button>`}
-          <button class="btn-edit" data-id="${p.id}" data-fab="${esc(p.fabricante||'')}" data-mod="${esc(p.modelo||'')}" data-ip="${esc(p.ip||'')}" data-conexao="${esc(p.conexao||'rede')}" data-estoque="${esc(p.estoque_modelo||'')}" data-serie="${esc(p.numero_serie||'')}" data-loc="${esc(p.localizacao||'')}" onclick="abrirEdicao(this)">✏️ Editar</button>
+          <button class="btn-edit" data-id="${p.id}" data-fab="${esc(p.fabricante||'')}" data-mod="${esc(p.modelo||'')}" data-ip="${esc(p.ip||'')}" data-conexao="${esc(p.conexao||'rede')}" data-estoque="${esc(p.estoque_modelo||'')}" data-serie="${esc(p.numero_serie||'')}" data-loc="${esc(p.localizacao||'')}" data-tipo="${esc(p.tipo||'Colorido')}" data-material="${esc(p.material||'Toner')}" data-comunidade="${esc(p.comunidade||'public')}" onclick="abrirEdicao(this)">✏️ Editar</button>
           <button class="btn-del" onclick="del(${p.id})">✕</button>
         </td>
       </tr>`).join('');
@@ -218,6 +231,9 @@
     document.getElementById('editSerie').value       = btn.dataset.serie;
     document.getElementById('editEstoque').value     = btn.dataset.estoque;
     document.getElementById('editLocalizacao').value = btn.dataset.loc;
+    document.getElementById('editTipo').value        = btn.dataset.tipo;
+    document.getElementById('editMaterial').value    = btn.dataset.material;
+    document.getElementById('editComunidade').value  = btn.dataset.comunidade;
     document.getElementById('modalEdit').classList.add('open');
   }
 
@@ -238,23 +254,33 @@
     const numero_serie = document.getElementById('editSerie').value.trim();
     const conexao     = document.getElementById('editConexao').value;
     const estoque_modelo = document.getElementById('editEstoque').value.trim();
+    const tipo        = document.getElementById('editTipo').value;
+    const material    = document.getElementById('editMaterial').value;
+    const comunidade  = document.getElementById('editComunidade').value.trim() || 'public';
     if (conexao === 'rede' && !ip) { showToast('Preencha o IP ou escolha conexão USB', true); return; }
     if (!modelo) { showToast('Preencha o Modelo/Setor', true); return; }
     try {
       const res = await fetch(`/api/impressoras/${id}`, {
         method: 'PUT', headers: authHeaders(),
-        body: JSON.stringify({ nome: fabricante, modelo, ip, localizacao, numero_serie, conexao, estoque_modelo })
+        body: JSON.stringify({ nome: fabricante, modelo, ip, localizacao, numero_serie, conexao, estoque_modelo, tipo, material, comunidade })
       });
-      if (!res.ok) throw new Error();
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(json.erro);
       document.getElementById('modalEdit').classList.remove('open');
       showToast('Impressora atualizada!'); carregar();
-    } catch { showToast('Erro ao salvar edição!', true); }
+    } catch (e) { showToast(e.message || 'Erro ao salvar edição!', true); }
   }
 
   function del(id) {
-    confirmar('Remover impressora', 'Esta ação não pode ser desfeita.', async () => {
-      await fetch(`/api/impressoras/${id}`, { method: 'DELETE', headers: authHeaders() });
-      showToast('Impressora removida'); carregar();
+    const imp = todosImps.find(p => p.id === id);
+    const nome = imp ? `${imp.modelo}${imp.localizacao ? ' (' + imp.localizacao + ')' : ''}` : 'esta impressora';
+    confirmar('Remover impressora', `Remover ${nome} e todo o histórico dela? Esta ação não pode ser desfeita.`, async () => {
+      try {
+        const res = await fetch(`/api/impressoras/${id}`, { method: 'DELETE', headers: authHeaders() });
+        if (!res.ok) throw new Error((await res.json().catch(() => ({}))).erro);
+        showToast('Impressora removida');
+      } catch (e) { showToast(e.message || 'Erro ao remover impressora!', true); }
+      carregar();
     });
   }
 
@@ -278,7 +304,7 @@
       const json = await res.json();
       if (!res.ok) throw new Error(json.erro);
       document.getElementById('modalPrint').classList.remove('open');
-      showToast('Impressão enviada!');
+      showToast(json.aviso ? 'Impressão enviada — ' + json.aviso : 'Impressão enviada!');
     } catch(e) { showToast('Erro: ' + (e.message||'desconhecido'), true); }
   }
 

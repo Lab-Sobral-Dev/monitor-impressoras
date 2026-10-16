@@ -37,6 +37,20 @@ const IPV4_RE = /^((25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(25[0-5]|2[0-4]\d|[01]?\d\
 
 // Impressora conectada via USB: sem IP, sem consulta SNMP nem histórico de status
 const CONEXOES = ['rede', 'usb'];
+const TIPOS_IMPRESSORA = ['Colorido', 'Mono', 'Manutencao'];
+const MATERIAIS = ['Tinta', 'Toner'];
+
+// Outra impressora de rede já usa o IP? (duas no mesmo IP misturariam leituras e histórico)
+async function impressoraComMesmoIp(ip, ignorarId = null) {
+    if (!ip) return null;
+    const [outra] = await consultarTodos(
+        "SELECT id, modelo, localizacao FROM impressoras WHERE ip = ? AND conexao <> 'usb' AND id IS NOT ?", [ip, ignorarId]);
+    return outra || null;
+}
+
+function erroIpDuplicado(ip, outra) {
+    return `Já existe uma impressora com o IP ${ip}: ${outra.modelo}${outra.localizacao ? ' (' + outra.localizacao + ')' : ''}`;
+}
 
 function ehUSB(imp) {
     return imp?.conexao === 'usb';
@@ -58,6 +72,12 @@ function validarImpressora(body, obrigatorio = true) {
     const { numero_serie } = body;
     if (numero_serie !== undefined && numero_serie !== null && (typeof numero_serie !== 'string' || numero_serie.length > 64)) {
         erros.push('numero_serie deve ser texto de até 64 caracteres');
+    }
+    const { tipo, material, comunidade } = body;
+    if (tipo !== undefined && !TIPOS_IMPRESSORA.includes(tipo)) erros.push(`tipo deve ser ${TIPOS_IMPRESSORA.join(', ')}`);
+    if (material !== undefined && !MATERIAIS.includes(material)) erros.push(`material deve ser ${MATERIAIS.join(' ou ')}`);
+    if (comunidade !== undefined && comunidade !== null && (typeof comunidade !== 'string' || comunidade.length > 64)) {
+        erros.push('comunidade deve ser texto de até 64 caracteres');
     }
     const { estoque_modelo } = body;
     if (estoque_modelo !== undefined && estoque_modelo !== null && (typeof estoque_modelo !== 'string' || estoque_modelo.length > 120)) {
@@ -761,12 +781,14 @@ app.get('/api/impressoras', exigirAlgumaPermissao(['impressoras', 'estoque', 're
     });
 });
 
-app.post('/api/impressoras', exigirPermissao('impressoras'), (req, res, next) => {
+app.post('/api/impressoras', exigirPermissao('impressoras'), async (req, res, next) => {
     const erros = validarImpressora(req.body, true);
     if (erros.length) return res.status(400).json({ erro: erros.join('; ') });
 
     const { nome, ip, modelo, localizacao, comunidade, tipo, material, numero_serie, estoque_modelo } = req.body;
     const conexao = req.body.conexao || 'rede';
+    const outra = conexao === 'usb' ? null : await impressoraComMesmoIp(ip.trim());
+    if (outra) return res.status(409).json({ erro: erroIpDuplicado(ip.trim(), outra) });
     db.run(
         `INSERT INTO impressoras (nome, ip, modelo, localizacao, comunidade, tipo, material, numero_serie, conexao, estoque_modelo) VALUES (?,?,?,?,?,?,?,?,?,?)`,
         [nome.trim(), conexao === 'usb' ? null : ip.trim(), modelo.trim(), localizacao?.trim?.() ?? localizacao, comunidade || 'public', tipo || 'Colorido', material || 'Toner', numero_serie?.trim() || null, conexao, estoque_modelo?.trim() || null],
@@ -783,12 +805,14 @@ app.put('/api/impressoras/:id', exigirPermissao('impressoras'), (req, res, next)
     if (erros.length) return res.status(400).json({ erro: erros.join('; ') });
 
     const { nome, modelo, ip, localizacao, comunidade, tipo, material, numero_serie, conexao, estoque_modelo } = req.body;
-    db.get('SELECT * FROM impressoras WHERE id = ?', [req.params.id], (err, existing) => {
+    db.get('SELECT * FROM impressoras WHERE id = ?', [req.params.id], async (err, existing) => {
         if (err) { console.error(err); return next(err); }
         if (!existing) return res.status(404).json({ erro: 'Impressora não encontrada' });
         const conexaoFinal = conexao ?? existing.conexao ?? 'rede';
         const ipFinal = conexaoFinal === 'usb' ? null : (String(ip ?? existing.ip ?? '').trim() || null);
         if (!ipFinal && conexaoFinal === 'rede') return res.status(400).json({ erro: 'ip é obrigatório para impressora de rede' });
+        const outra = await impressoraComMesmoIp(ipFinal, existing.id);
+        if (outra) return res.status(409).json({ erro: erroIpDuplicado(ipFinal, outra) });
         db.run(
             `UPDATE impressoras SET nome = ?, modelo = ?, ip = ?, localizacao = ?, comunidade = ?, tipo = ?, material = ?, numero_serie = ?, conexao = ?, estoque_modelo = ? WHERE id = ?`,
             [
@@ -813,13 +837,28 @@ app.put('/api/impressoras/:id', exigirPermissao('impressoras'), (req, res, next)
     });
 });
 
-app.delete('/api/impressoras/:id', exigirPermissao('impressoras'), (req, res, next) => {
-    db.run('DELETE FROM impressoras WHERE id = ?', req.params.id, function (err) {
-        if (err) { console.error(err); return next(err); }
-        if (this.changes === 0) return res.status(404).json({ erro: 'Impressora não encontrada' });
+// Remove a impressora e o histórico dela (as FKs ON DELETE CASCADE não são
+// aplicadas — o SQLite roda com foreign_keys desligado — e o histórico ficava órfão)
+const TABELAS_DA_IMPRESSORA = ['historico_tinta', 'historico_paginas', 'historico_status', 'trocas_toner'];
+
+app.delete('/api/impressoras/:id', exigirPermissao('impressoras'), async (req, res, next) => {
+    try {
+        await executar('BEGIN');
+        const r = await executar('DELETE FROM impressoras WHERE id = ?', [req.params.id]);
+        if (r.changes === 0) {
+            await executar('ROLLBACK');
+            return res.status(404).json({ erro: 'Impressora não encontrada' });
+        }
+        for (const tabela of TABELAS_DA_IMPRESSORA) {
+            await executar(`DELETE FROM ${tabela} WHERE impressora_id = ?`, [req.params.id]);
+        }
+        await executar('COMMIT');
         invalidarCacheDash();
         res.status(204).end();
-    });
+    } catch (e) {
+        await executar('ROLLBACK').catch(() => {});
+        next(e);
+    }
 });
 
 app.get('/api/estoque', exigirPermissao('estoque'), (req, res) => {
@@ -1021,6 +1060,15 @@ app.post('/api/impressoras/:id/imprimir', exigirPermissao('imprimir'), (req, res
         if (err || !imp) return res.status(404).json({ erro: 'Impressora não encontrada' });
         if (ehUSB(imp)) return res.status(400).json({ erro: 'Impressora conectada via USB não recebe impressão pela rede' });
 
+        // Os sockets podem disparar erro/timeout depois do sucesso; responder duas
+        // vezes lançava ERR_HTTP_HEADERS_SENT fora de qualquer try e o processo caía.
+        let respondido = false;
+        const responder = (status, corpo) => {
+            if (respondido) return;
+            respondido = true;
+            res.status(status).json(corpo);
+        };
+
         const docBuf = gerarPDF(conteudo, relatorio);
 
         function ippAttr(tag, name, value) {
@@ -1034,6 +1082,9 @@ app.post('/api/impressoras/:id/imprimir', exigirPermissao('imprimir'), (req, res
         const printerUri = `ipp://${imp.ip}/ipp/print`;
 
         function enviarIPP(docFormat, docBuffer, onSuccess, onFail) {
+            let terminou = false;
+            const sucesso = () => { if (!terminou) { terminou = true; onSuccess(); } };
+            const falha = sc => { if (!terminou) { terminou = true; onFail(sc); } };
             const a = Buffer.concat([
                 Buffer.from([0x01]),
                 ippAttr(0x47, 'attributes-charset',         'utf-8'),
@@ -1058,35 +1109,38 @@ app.post('/api/impressoras/:id/imprimir', exigirPermissao('imprimir'), (req, res
                 ippRes.on('end', () => {
                     const buf = Buffer.concat(chunks);
                     const sc  = buf.length >= 4 ? buf.readUInt16BE(2) : 0;
-                    if (sc >= 0x0400) return onFail(sc);
-                    onSuccess();
+                    if (ippRes.statusCode !== 200 || sc >= 0x0400) return falha(sc || null);
+                    sucesso();
                 });
             });
-            r.on('error', () => onFail(null));
+            r.on('error', () => falha(null));
             r.setTimeout(10000, () => r.destroy());
             r.write(body); r.end();
         }
 
         function enviarRaw(onSuccess, onFail) {
+            let terminou = false;
+            const sucesso = via => { if (!terminou) { terminou = true; onSuccess(via); } };
+            const falha = msg => { if (!terminou) { terminou = true; onFail(msg); } };
             const socket = new net.Socket();
             const buf = Buffer.from(conteudo.split('\n').join('\r\n') + '\r\n\f', 'utf8');
             socket.setTimeout(5000);
             socket.connect(9100, imp.ip, () => {
-                socket.write(buf, () => { socket.end(); onSuccess('RAW'); });
+                socket.write(buf, () => { socket.end(); sucesso('RAW'); });
             });
-            socket.on('timeout', () => { socket.destroy(); onFail('Timeout na porta 9100'); });
-            socket.on('error',   () => onFail('Impressora não respondeu em IPP nem RAW'));
+            socket.on('timeout', () => { socket.destroy(); falha('Timeout na porta 9100'); });
+            socket.on('error',   () => falha('Impressora não respondeu em IPP nem RAW'));
         }
 
         // Cascata: PDF → octet-stream → RAW
         const textBuf = Buffer.from(conteudo + '\n', 'utf8');
         enviarIPP('application/pdf', docBuf,
-            () => res.json({ sucesso: true }),
+            () => responder(200, { sucesso: true }),
             sc1 => enviarIPP('application/octet-stream', textBuf,
-                () => res.json({ sucesso: true }),
+                () => responder(200, { sucesso: true }),
                 sc2 => enviarRaw(
-                    via  => res.json({ sucesso: true, aviso: `Enviado via ${via}` }),
-                    msg  => res.status(500).json({ erro: msg || `IPP ${sc1 ? sc1.toString(16) : sc2 ? sc2.toString(16) : '?'}` })
+                    via  => responder(200, { sucesso: true, aviso: `Enviado via ${via} (texto simples)` }),
+                    msg  => responder(502, { erro: msg || `IPP ${sc1 ? sc1.toString(16) : sc2 ? sc2.toString(16) : '?'}` })
                 )
             )
         );
